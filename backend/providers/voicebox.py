@@ -13,6 +13,18 @@ from .base import BaseTTSProvider, VoiceInfo
 DEFAULT_VOICEBOX_URL = "http://127.0.0.1:17493"
 
 
+def _touch_tts_activity() -> None:
+    """Stamp activity file so Voicebox GPU lifecycle daemon preserves warm VRAM models."""
+    try:
+        hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        os.makedirs(hermes_home, exist_ok=True)
+        path = os.path.join(hermes_home, "voicebox_tts_activity")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f'{{"touched_at": {time.time()}, "pid": {os.getpid()}}}\n')
+    except Exception:
+        pass
+
+
 class VoiceboxProvider(BaseTTSProvider):
     def __init__(self, base_url: str = DEFAULT_VOICEBOX_URL):
         self._base_url = base_url.rstrip("/")
@@ -100,9 +112,11 @@ class VoiceboxProvider(BaseTTSProvider):
             headers={"Content-Type": "application/json"},
         )
 
+        _touch_tts_activity()
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 audio_bytes = r.read()
+            _touch_tts_activity()
         except Exception as stream_err:
             # Fallback to async job API (/generate -> /history/{id} -> /audio/{id})
             post_resp = requests.post(f"{self._base_url}/generate", json=payload, timeout=10)
@@ -163,6 +177,7 @@ class VoiceboxProvider(BaseTTSProvider):
         try:
             sample_resp = requests.post(f"{self._base_url}/profiles/{pid}/samples", files=files, data=data, timeout=30)
             sample_resp.raise_for_status()
+            _touch_tts_activity()
         except Exception as e:
             # Clean up the empty profile on error
             try:
