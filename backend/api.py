@@ -1,0 +1,244 @@
+"""FastAPI router and backend service for PersonaStudio."""
+from __future__ import annotations
+
+import base64
+import os
+import uuid
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+
+from .providers.base import BaseTTSProvider, VoiceInfo
+from .providers.fish_audio import FishAudioProvider
+from .providers.voicebox import VoiceboxProvider
+from .storage import PersonaBundle, PersonaStorage
+from . import bot_profiles
+
+router = APIRouter(prefix="/api/studio", tags=["PersonaStudio"])
+storage = PersonaStorage()
+
+fish_provider = FishAudioProvider()
+voicebox_provider = VoiceboxProvider()
+
+PROVIDERS: Dict[str, BaseTTSProvider] = {
+    "fish_audio": fish_provider,
+    "voicebox": voicebox_provider,
+}
+
+
+class AuditionRequest(BaseModel):
+    text: str
+    provider: str = "voicebox"
+    voice_id: Optional[str] = "default"
+    speed: float = 1.0
+    temperature: float = 0.7
+    engine: Optional[str] = None
+
+
+class CreatePersonaRequest(BaseModel):
+    id: Optional[str] = None
+    name: str
+    avatar: str = "🤖"
+    system_prompt: str
+    provider: str = "voicebox"
+    voice_id: str
+    voice_name: str
+    speed: float = 1.0
+    temperature: float = 0.7
+    tags: Optional[List[str]] = None
+
+
+class AssignVoiceRequest(BaseModel):
+    provider: str
+    voice_id: str
+    voice_name: str
+
+
+@router.get("/status")
+def get_status() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "providers": {
+            "fish_audio": {"available": fish_provider.is_available(), "has_key": bool(fish_provider._api_key)},
+            "voicebox": {"available": voicebox_provider.is_available(), "url": voicebox_provider._base_url},
+        },
+    }
+
+
+@router.get("/models")
+def list_clone_models(provider: str = "voicebox") -> List[Dict[str, Any]]:
+    """Return available engines/models for cloning and synthesis."""
+    if provider == "voicebox":
+        return [
+            {"id": "qwen_fast", "name": "Qwen 3 (0.6B - ⚡ Instant ~0.4s Lag, Low VRAM, Local GPU)", "recommended": True},
+            {"id": "qwen", "name": "Qwen 3 (1.7B Standard, Deep Expressiveness, Local GPU)", "recommended": False},
+            {"id": "chatterbox_turbo", "name": "Chatterbox Turbo (High Emotion, Tag-Aware, Local GPU)", "recommended": False},
+            {"id": "chatterbox", "name": "Chatterbox Standard (Deep Neural Voice, Local GPU)", "recommended": False},
+            {"id": "kokoro", "name": "Kokoro (Ultra-Fast Preset Only, Low VRAM)", "recommended": False},
+        ]
+    elif provider == "fish_audio":
+        return [
+            {"id": "s2.1-pro-free", "name": "Fish Audio S2.1 Pro (Free Tier, Zero-Shot)", "recommended": True},
+            {"id": "s1", "name": "Fish Audio Speech S1 (High Accuracy)", "recommended": False},
+            {"id": "speech-1.5", "name": "Fish Audio Speech 1.5", "recommended": False},
+        ]
+    return []
+
+
+@router.delete("/voices/{provider}/{voice_id}")
+def delete_voice(provider: str, voice_id: str) -> Dict[str, Any]:
+    prov = PROVIDERS.get(provider)
+    if not prov:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+    if not prov.is_available():
+        raise HTTPException(status_code=503, detail=f"Provider '{provider}' is not available")
+
+    ok = prov.delete_voice(voice_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Failed to delete voice '{voice_id}' from {provider}")
+    return {"ok": True, "deleted": voice_id}
+
+
+@router.post("/voices/{provider}/{voice_id}/resample")
+async def resample_voice(
+    provider: str,
+    voice_id: str,
+    reference_text: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    prov = PROVIDERS.get(provider)
+    if not prov:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+    if not prov.is_available():
+        raise HTTPException(status_code=503, detail=f"Provider '{provider}' is not available")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty audio sample")
+
+    ok = prov.resample_voice(
+        voice_id=voice_id,
+        audio_bytes=content,
+        filename=file.filename or "sample.wav",
+        reference_text=reference_text,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Failed to re-sample voice '{voice_id}'")
+    return {"ok": True, "resampled": voice_id}
+
+
+@router.get("/voices")
+def list_voices(provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    target_providers = [PROVIDERS[provider]] if provider and provider in PROVIDERS else PROVIDERS.values()
+
+    for p in target_providers:
+        if p.is_available():
+            for v in p.list_voices():
+                out.append(v.to_dict())
+    return out
+
+
+@router.post("/audition")
+def audition_voice(req: AuditionRequest) -> Dict[str, Any]:
+    prov = PROVIDERS.get(req.provider)
+    if not prov:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{req.provider}'")
+    if not prov.is_available():
+        raise HTTPException(status_code=503, detail=f"Provider '{req.provider}' is not available or unconfigured")
+
+    try:
+        audio_bytes = prov.synthesize(
+            text=req.text,
+            voice_id=req.voice_id,
+            speed=req.speed,
+            temperature=req.temperature,
+            engine=req.engine,
+        )
+        b64 = base64.b64encode(audio_bytes).decode("ascii")
+        return {"ok": True, "audio_base64": b64, "format": "audio/wav"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/clone")
+async def clone_voice(
+    name: str = Form(...),
+    provider: str = Form("voicebox"),
+    engine: Optional[str] = Form("chatterbox_turbo"),
+    description: Optional[str] = Form(None),
+    reference_text: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    prov = PROVIDERS.get(provider)
+    if not prov:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+    if not prov.is_available():
+        raise HTTPException(status_code=503, detail=f"Provider '{provider}' is not available or unconfigured")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty audio sample")
+
+    try:
+        vinfo = prov.clone_voice(
+            name=name,
+            audio_bytes=content,
+            filename=file.filename or "sample.wav",
+            description=description,
+            engine=engine,
+            reference_text=reference_text,
+        )
+        return {"ok": True, "voice": vinfo.to_dict()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/personas")
+def list_personas() -> List[Dict[str, Any]]:
+    return [p.to_dict() for p in storage.list_personas()]
+
+
+@router.post("/personas")
+def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
+    pid = req.id or req.name.lower().replace(" ", "_")
+    bundle = PersonaBundle(
+        id=pid,
+        name=req.name,
+        avatar=req.avatar,
+        system_prompt=req.system_prompt,
+        provider=req.provider,
+        voice_id=req.voice_id,
+        voice_name=req.voice_name,
+        speed=req.speed,
+        temperature=req.temperature,
+        tags=req.tags or [],
+    )
+    saved = storage.save_persona(bundle)
+    return {"ok": True, "persona": saved.to_dict()}
+
+
+@router.delete("/personas/{persona_id}")
+def delete_persona(persona_id: str) -> Dict[str, Any]:
+    deleted = storage.delete_persona(persona_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    return {"ok": True}
+
+
+@router.get("/profiles")
+def get_bot_profiles() -> List[Dict[str, Any]]:
+    return bot_profiles.list_bot_profiles()
+
+
+@router.post("/profiles/{profile_id}/assign-voice")
+def assign_bot_voice(profile_id: str, req: AssignVoiceRequest) -> Dict[str, Any]:
+    try:
+        return bot_profiles.assign_voice_to_profile(
+            profile_id=profile_id,
+            provider=req.provider,
+            voice_id=req.voice_id,
+            voice_name=req.voice_name,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
