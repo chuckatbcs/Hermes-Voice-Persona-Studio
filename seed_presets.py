@@ -22,7 +22,7 @@ PRESETS = [
         "voice_name": "Fish Audio (Default)",
         "speed": 1.0,
         "temperature": 0.7,
-        "character_strength": "soft",
+        "character_strength": 25,
         "prompt": (
             "Precise, calm, formal British butler manner: dry understated wit, "
             "respectful address, structured concise answers with clear next actions. "
@@ -40,7 +40,7 @@ PRESETS = [
         "voice_name": "Cartman",
         "speed": 1.05,
         "temperature": 0.8,
-        "character_strength": "soft",
+        "character_strength": 25,
         "prompt": (
             "Aggressive, impatient, defiant South Park snark. Unfiltered comic outbursts, "
             "but still complete the profile's actual job (for example PC repair on mechanic). "
@@ -57,7 +57,7 @@ PRESETS = [
         "voice_name": "Fish Audio (Default)",
         "speed": 0.95,
         "temperature": 0.75,
-        "character_strength": "soft",
+        "character_strength": 25,
         "prompt": (
             "Vivid descriptive imagery, measured pacing, and theatrical gravitas. "
             "Bring atmosphere to explanations without abandoning the profile's job or "

@@ -89,13 +89,13 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 ### 1. Launching the Studio
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. The next reply picks up the ephemeral overlay. The selected Hermes profile’s SOUL / job / skills stay primary (Mechanic + Cartman = mechanic that *speaks like* Cartman). **Character strength** (Soft / Medium / Strong) on the pack scales how hard the LLM leans on that style — this is **not** TTS Temperature / Expressiveness. The titlebar lists only packs with a non-stub prompt and a usable cloned voice; voice-only clones stay in Studio. Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay — another bot’s Cartman name is not an apply. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only.
+3. Picking a **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. **Character strength (0–100%)** on the pack: **0%** = profile SOUL / AGENTS.md only (no style overlay); **100%** = the character **eclipses** SOUL for this session; mid values blend. This is **not** TTS Temperature / Expressiveness. The titlebar lists only packs with a non-stub prompt and a usable cloned voice; voice-only clones stay in Studio. Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
 2. Choose a voice from the dropdown. For near-zero latency on local GPUs, select **`Qwen 3 (0.6B - ⚡ Instant ~0.4s Lag)`**.
 3. Type any text in the preview box and click **`▶ Audition`**.
-4. Adjust **Speed** and **Temperature / Expressiveness (TTS only)** for audition. Use **Character strength (LLM style)** to choose Soft / Medium / Strong overlay emphasis — Temperature does **not** change how in-character the text replies are.
+4. Adjust **Speed** and **Temperature / Expressiveness (TTS only)** for audition. Use **Character strength (LLM) 0–100%** — 0% = profile soul only, 100% = character replaces soul for this session. Temperature does **not** change how in-character the text replies are.
 
 ### 3. Assigning a Voice to a Bot for Group Chats
 1. In the Studio dialog, locate the **`🤖 Assign Voice to Hermes Bot / Profile`** section.

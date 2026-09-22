@@ -15,7 +15,7 @@ from .managed_index import SOURCE_TAG, remember_writes
 from .paths import config_path_for_profile, hermes_home, profiles_dir
 from .persona_sync import (
     build_style_overlay_prompt,
-    normalize_character_strength,
+    character_strength_percent,
     slugify_persona_id,
 )
 
@@ -189,7 +189,7 @@ def set_profile_persona(
     persona_prompt: str,
     *,
     cfg_path: Optional[Path] = None,
-    character_strength: Optional[str] = None,
+    character_strength: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Set the persona for a Hermes profile via display.personality.
 
@@ -206,7 +206,11 @@ def set_profile_persona(
         raise FileNotFoundError(f"Configuration file not found for profile '{profile_id}' at {path}")
 
     clean_name = _clean_key(persona_name)
-    neutral = clean_name in ("", "none", "default", "neutral")
+    percent = 25 if character_strength is None else character_strength_percent(character_strength)
+    # Explicit 0 means soul-only: do not inject an overlay even if a name is given.
+    neutral = clean_name in ("", "none", "default", "neutral") or (
+        character_strength is not None and percent <= 0
+    )
 
     if neutral:
         updates = {"display.personality": ""}
@@ -217,16 +221,17 @@ def set_profile_persona(
             "profile_id": profile_id,
             "persona": "",
             "write_strategy": strategy,
+            "character_strength": 0 if percent <= 0 else percent,
             "message": f"Personality overlay cleared for profile '{profile_id}' — next reply uses stock profile soul",
         }
 
     personality_value = {
         "system_prompt": build_style_overlay_prompt(
-            persona_name, persona_prompt, strength=character_strength
+            persona_name, persona_prompt, strength=percent
         ),
         "source": SOURCE_TAG,
         "description": persona_name,
-        "character_strength": normalize_character_strength(character_strength),
+        "character_strength": percent,
     }
     updates = {
         f"agent.personalities.{clean_name}": personality_value,

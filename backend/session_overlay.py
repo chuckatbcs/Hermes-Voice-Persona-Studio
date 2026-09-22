@@ -32,8 +32,8 @@ from .paths import config_path_for_profile, session_state_path
 from .persona_sync import (
     STYLE_OVERLAY_MARKER,
     build_style_overlay_prompt,
+    character_strength_percent,
     is_style_overlay_prompt,
-    normalize_character_strength,
 )
 
 STASH_KEYS = (
@@ -236,7 +236,7 @@ def apply_session_overlay(
     provider: Optional[str] = None,
     voice_id: Optional[str] = None,
     voice_name: Optional[str] = None,
-    character_strength: Optional[str] = None,
+    character_strength: Optional[Any] = None,
     cfg_path: Optional[Path] = None,
     state_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -260,17 +260,28 @@ def apply_session_overlay(
             "stash": stash,
         }
 
-    strength = normalize_character_strength(character_strength)
+    strength = character_strength_percent(character_strength)
     style_overlay = build_style_overlay_prompt(
         persona_name, persona_prompt, strength=strength
     )
-    persona_result = bot_profiles.set_profile_persona(
-        profile_id,
-        persona_name,
-        style_overlay,
-        cfg_path=path,
-        character_strength=strength,
-    )
+    if strength <= 0:
+        # 0% = no style overlay. Soul/AGENTS.md win. TTS may still bind.
+        persona_result = bot_profiles.set_profile_persona(
+            profile_id,
+            "none",
+            "",
+            cfg_path=path,
+            character_strength=0,
+        )
+        style_overlay = ""
+    else:
+        persona_result = bot_profiles.set_profile_persona(
+            profile_id,
+            persona_name,
+            style_overlay,
+            cfg_path=path,
+            character_strength=strength,
+        )
     cfg_live = load_yaml(path)
     live_prompt = str(get_dotted(cfg_live, "agent.system_prompt") or "")
     if _is_studio_injected_prompt(cfg_live, live_prompt):
@@ -287,25 +298,39 @@ def apply_session_overlay(
         )
 
     entry["active"] = True
-    entry["applied_persona"] = persona_result.get("persona") or bot_profiles._clean_key(persona_name)
+    entry["applied_persona"] = bot_profiles._clean_key(persona_name)
+    entry["character_strength"] = strength
     profiles[profile_id] = entry
     save_session_state(state, state_path)
+
+    if strength <= 0:
+        message = (
+            f"No style overlay at 0% on '{profile_id}' — profile soul only. "
+            "New Chat restores stock Hermes."
+        )
+    elif strength >= 100:
+        message = (
+            f"Character '{persona_name}' eclipses SOUL on '{profile_id}' for this session. "
+            "New Chat restores stock Hermes."
+        )
+    else:
+        message = (
+            f"Speaking style '{persona_name}' at {strength}% on '{profile_id}'. "
+            "New Chat restores stock Hermes."
+        )
 
     return {
         "ok": True,
         "profile_id": profile_id,
         "scope": "session",
-        "persona": persona_result.get("persona"),
+        "persona": entry["applied_persona"],
         "provider": (voice_result or {}).get("provider"),
         "voice": (voice_result or {}).get("voice"),
         "write_strategy": persona_result.get("write_strategy"),
         "style_overlay": style_overlay,
         "character_strength": strength,
         "touched_system_prompt": False,
-        "message": (
-            f"Speaking style '{persona_name}' applied to this session on '{profile_id}'. "
-            "Profile soul/job stay primary. The next new chat returns to stock Hermes."
-        ),
+        "message": message,
     }
 
 

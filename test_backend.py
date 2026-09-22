@@ -53,6 +53,29 @@ class TestPersonaStorage(IsolatedHermesHomeTest):
         self.assertEqual(loaded.system_prompt, "You are a test assistant.")
         self.assertEqual(len(storage.list_personas()), 1)
 
+    def test_storage_migrates_legacy_character_strength(self):
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        bundle = PersonaBundle(
+            id="cartman",
+            name="Eric Cartman",
+            avatar="🧢",
+            system_prompt="Aggressive impatient South Park snark while doing the job.",
+            provider="voicebox",
+            voice_id="c9da87b0-19be-49c4-ab44-01cb7943f5c4",
+            voice_name="Cartman",
+            character_strength="strong",
+        )
+        storage.save_persona(bundle)
+        loaded = storage.get_persona("cartman")
+        self.assertEqual(loaded.character_strength, 85)
+        self.assertEqual(
+            PersonaBundle.from_dict({"id": "x", "name": "X", "avatar": "🤖",
+                                     "system_prompt": "enough text for a real prompt here",
+                                     "provider": "fish_audio", "voice_id": "v",
+                                     "voice_name": "V", "character_strength": "medium"}).character_strength,
+            55,
+        )
+
     def test_storage_skips_dotfiles(self):
         root = self.home / "personas"
         storage = PersonaStorage(root_dir=str(root))
@@ -107,31 +130,42 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         already = persona_sync.build_style_overlay_prompt("Eric Cartman", overlay)
         self.assertEqual(already, overlay)
 
-    def test_character_strength_bands_change_overlay_emphasis(self):
+    def test_character_strength_percent_scale(self):
         source = "Aggressive, impatient South Park snark. Still do the profile job."
-        soft = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength="soft")
-        medium = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength="medium")
-        strong = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength="strong")
-        from_percent = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=90)
+        zero = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=0)
+        soft = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=25)
+        medium = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=55)
+        heavy = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=85)
+        eclipse = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=100)
+        self.assertEqual(zero, "")
+        self.assertEqual(persona_sync.character_strength_percent("soft"), 25)
+        self.assertEqual(persona_sync.character_strength_percent("medium"), 55)
+        self.assertEqual(persona_sync.character_strength_percent("strong"), 85)
+        self.assertEqual(persona_sync.character_strength_band(0), "none")
+        self.assertEqual(persona_sync.character_strength_band(25), "soft")
+        self.assertEqual(persona_sync.character_strength_band(55), "medium")
+        self.assertEqual(persona_sync.character_strength_band(85), "heavy")
+        self.assertEqual(persona_sync.character_strength_band(100), "eclipse")
         self.assertNotEqual(soft, medium)
-        self.assertNotEqual(medium, strong)
-        self.assertNotEqual(soft, strong)
-        self.assertEqual(strong, from_percent)
-        self.assertEqual(persona_sync.normalize_character_strength(25), "soft")
-        self.assertEqual(persona_sync.normalize_character_strength(50), "medium")
-        self.assertEqual(persona_sync.normalize_character_strength(85), "strong")
-        self.assertIn("(soft)", soft)
+        self.assertNotEqual(medium, heavy)
         self.assertIn("Additionally, reply in the speaking style", soft)
+        self.assertIn("does not replace this profile's role", soft)
         self.assertIn("Prefer this character's speaking voice", medium)
-        self.assertIn("Character priority is high", strong)
-        for overlay in (soft, medium, strong):
+        self.assertIn("character-heavy", heavy)
+        self.assertIn("secondary", heavy.lower())
+        self.assertNotIn(persona_sync.STYLE_OVERLAY_MARKER, eclipse)
+        self.assertIn(persona_sync.CHARACTER_ECLIPSE_MARKER, eclipse)
+        self.assertIn("You are Eric Cartman", eclipse)
+        self.assertIn("eclipses this profile", eclipse.lower())
+        self.assertNotIn("does not replace this profile's role", eclipse)
+        self.assertNotIn("SOUL stays primary", eclipse)
+        self.assertNotIn("Keep the identity, mission", eclipse)
+        for overlay in (soft, medium, heavy):
             self.assertIn("SOUL.md", overlay)
-            self.assertIn("AGENTS.md", overlay)
             self.assertIn("snark", overlay.lower())
             self.assertNotRegex(overlay, r"(?i)^you are eric cartman")
-            self.assertNotIn("TTS temperature", overlay.lower())
-        rebuilt = persona_sync.build_style_overlay_prompt("Eric Cartman", soft, strength="strong")
-        self.assertIn("Character priority is high", rebuilt)
+        rebuilt = persona_sync.build_style_overlay_prompt("Eric Cartman", soft, strength=100)
+        self.assertIn("You are Eric Cartman", rebuilt)
         self.assertIn("snark", rebuilt.lower())
 
     def test_listable_pack_requires_prompt_and_cloned_voice(self):
@@ -1044,7 +1078,7 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
             any(p.get("profile_id") == "critic" and p.get("leftover_personality_cleared") for p in report["profiles"])
         )
 
-    def test_apply_strong_character_strength_writes_emphatic_overlay(self):
+    def test_apply_zero_skips_style_overlay(self):
         from backend import session_overlay
 
         cfg = self._write_config()
@@ -1055,15 +1089,62 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
             provider="fish_audio",
             voice_id="cartman-id",
             voice_name="Hermes eric_cartman",
-            character_strength="strong",
+            character_strength=0,
             cfg_path=cfg,
         )
-        self.assertEqual(apply["character_strength"], "strong")
-        self.assertIn("Character priority is high", apply["style_overlay"])
+        self.assertEqual(apply["character_strength"], 0)
+        self.assertEqual(apply["style_overlay"], "")
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(after["display"]["personality"], "")
+        self.assertEqual(after["tts"]["provider"], "fish")
+        self.assertNotIn("You are Eric Cartman", (after.get("agent") or {}).get("system_prompt") or "")
+
+    def test_apply_hundred_eclipses_soul(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        apply = session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman. Speak with aggressive snark.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            character_strength=100,
+            cfg_path=cfg,
+        )
+        self.assertEqual(apply["character_strength"], 100)
+        self.assertIn("You are Eric Cartman", apply["style_overlay"])
+        self.assertIn("eclipses this profile", apply["style_overlay"].lower())
+        self.assertNotIn("does not replace this profile's role", apply["style_overlay"])
+        self.assertNotIn(persona_sync.STYLE_OVERLAY_MARKER, apply["style_overlay"])
         after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         overlay = after["agent"]["personalities"]["eric_cartman"]["system_prompt"]
-        self.assertIn("Character priority is high", overlay)
-        self.assertEqual(after["agent"]["personalities"]["eric_cartman"]["character_strength"], "strong")
+        self.assertIn("You are Eric Cartman", overlay)
+        self.assertEqual(after["display"]["personality"], "eric_cartman")
+        self.assertEqual(after["agent"]["personalities"]["eric_cartman"]["character_strength"], 100)
+        self.assertNotEqual((after.get("agent") or {}).get("system_prompt") or "", overlay)
+
+    def test_apply_mid_character_strength_writes_blend_overlay(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        apply = session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman. Speak with aggressive snark.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            character_strength=85,
+            cfg_path=cfg,
+        )
+        self.assertEqual(apply["character_strength"], 85)
+        self.assertIn("character-heavy", apply["style_overlay"])
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        overlay = after["agent"]["personalities"]["eric_cartman"]["system_prompt"]
+        self.assertIn("character-heavy", overlay)
+        self.assertEqual(after["agent"]["personalities"]["eric_cartman"]["character_strength"], 85)
         self.assertNotEqual((after.get("agent") or {}).get("system_prompt") or "", overlay)
 
     def test_apply_does_not_write_bare_you_are_cartman_identity(self):
@@ -1260,7 +1341,7 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("character_strength", select)
         self.assertNotIn("🎙️ CLONES", self.src)
         self.assertIn("complete packs", self.src)
-        self.assertIn("Character strength (LLM style — not TTS)", self.src)
+        self.assertIn("Character strength (LLM) — 0% = profile soul only", self.src)
         self.assertIn("Temperature / Expressiveness (TTS only)", self.src)
 
     def test_profile_switch_to_other_bot_is_not_user_new_chat(self):
@@ -1314,13 +1395,13 @@ class TestPluginSessionWatchRace(unittest.TestCase):
             console.log(JSON.stringify({
               complete: isListablePersonaPack(complete, [orphanVoice]),
               stub: isListablePersonaPack(stub, [orphanVoice]),
-              strength: normalizeCharacterStrength(80)
+              strength: characterStrengthPercent(80)
             }));
             """,
         )
         self.assertTrue(data["complete"])
         self.assertFalse(data["stub"])
-        self.assertEqual(data["strength"], "strong")
+        self.assertEqual(data["strength"], 80)
 
     def _run_js_helpers(self, helpers: str, body: str):
         import json

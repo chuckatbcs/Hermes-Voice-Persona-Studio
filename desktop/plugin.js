@@ -166,30 +166,29 @@ function lookupSelection(id, personas, voices) {
 }
 
 // TITLEBAR_PACK_BEGIN
-function normalizeCharacterStrength(value) {
-  if (value == null || value === '') return 'soft';
+function characterStrengthPercent(value) {
+  if (value == null || value === '') return 25;
   if (typeof value === 'string') {
     const lowered = value.trim().toLowerCase();
-    if (lowered === 'soft' || lowered === 'medium' || lowered === 'strong') return lowered;
+    if (lowered === 'soft') return 25;
+    if (lowered === 'medium') return 55;
+    if (lowered === 'strong') return 85;
     const parsed = Number(lowered);
-    if (!Number.isFinite(parsed)) return 'soft';
+    if (!Number.isFinite(parsed)) return 25;
     value = parsed;
   }
-  const number = Number(value);
-  if (!Number.isFinite(number)) return 'soft';
-  if (number <= 33) return 'soft';
-  if (number <= 66) return 'medium';
-  return 'strong';
-}
-
-function characterStrengthPercent(value) {
-  const band = normalizeCharacterStrength(value);
-  return band === 'soft' ? 25 : band === 'medium' ? 50 : 85;
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return 25;
+  return Math.max(0, Math.min(100, number));
 }
 
 function characterStrengthLabel(value) {
-  const band = normalizeCharacterStrength(value);
-  return band === 'soft' ? 'Soft' : band === 'medium' ? 'Medium' : 'Strong';
+  const percent = characterStrengthPercent(value);
+  if (percent <= 0) return 'Soul only';
+  if (percent <= 40) return 'Soft';
+  if (percent <= 70) return 'Medium';
+  if (percent < 100) return 'Heavy';
+  return 'Full character';
 }
 
 function isPlaceholderVoiceId(value) {
@@ -723,7 +722,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
           provider: boundProvider,
           voice_id: boundVoiceId && boundVoiceId !== 'default' ? boundVoiceId : null,
           voice_name: boundVoiceName,
-          character_strength: normalizeCharacterStrength(bundle.character_strength)
+          character_strength: characterStrengthPercent(bundle.character_strength)
         })
       });
       applied = applyRes.ok;
@@ -1052,7 +1051,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
           voice_name: chosenV ? chosenV.name : selectedVoice,
           speed: parseFloat(speed),
           temperature: parseFloat(temperature),
-          character_strength: normalizeCharacterStrength(characterStrength)
+          character_strength: characterStrengthPercent(characterStrength)
         })
       });
       if (res.ok) {
@@ -1320,8 +1319,8 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                     jsxs('label', {
                       className: 'text-xs font-medium flex justify-between',
                       children: [
-                        'Character strength (LLM style — not TTS):',
-                        `${characterStrengthLabel(characterStrength)} (${characterStrength})`
+                        'Character strength (LLM) — 0% = profile soul only, 100% = character replaces soul for this session:',
+                        `${characterStrengthLabel(characterStrength)} (${characterStrength}%)`
                       ]
                     }),
                     jsx('input', {
@@ -1335,7 +1334,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                     }),
                     jsx('p', {
                       className: 'text-[10px] text-muted-foreground mt-1',
-                      children: 'Soft = current light overlay. Medium = prefer this character’s voice. Strong = emphatic character while still doing the profile job. Temperature above is TTS-only.'
+                      children: '0% = no style overlay (soul only). Soft 1–40 / Medium 41–70 / Heavy 71–99 blend character vs SOUL. 100% = character eclipses SOUL for this session. Temperature above is TTS-only.'
                     })
                   ]
                 })

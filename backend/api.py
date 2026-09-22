@@ -47,7 +47,7 @@ class CreatePersonaRequest(BaseModel):
     voice_name: str
     speed: float = 1.0
     temperature: float = 0.7
-    character_strength: Optional[Any] = "soft"
+    character_strength: Optional[Any] = 25
     tags: Optional[List[str]] = None
 
 
@@ -232,7 +232,7 @@ def list_personas(listable: bool = False) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for bundle in storage.list_personas():
         data = bundle.to_dict()
-        data["character_strength"] = persona_sync.normalize_character_strength(
+        data["character_strength"] = persona_sync.character_strength_percent(
             bundle.character_strength
         )
         data["listable"] = persona_sync.is_listable_persona_pack(bundle, voices or None)
@@ -308,7 +308,7 @@ def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
         voice_name=req.voice_name,
         speed=req.speed,
         temperature=req.temperature,
-        character_strength=persona_sync.normalize_character_strength(req.character_strength),
+        character_strength=persona_sync.character_strength_percent(req.character_strength),
         tags=req.tags or [],
     )
     saved = storage.save_persona(bundle)
