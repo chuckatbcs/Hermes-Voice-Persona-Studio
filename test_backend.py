@@ -1379,6 +1379,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("persona-select-${profileId}", self.src)
         self.assertIn("syncTitlebarToFocusedProfile", self.src)
         self.assertIn("character_strength", select)
+        self.assertIn("refreshLiveSessionPersonality", select)
+        self.assertIn("config.set", self.src)
+        self.assertIn("host.request", self.src)
         self.assertNotIn("🎙️ CLONES", self.src)
         self.assertIn("complete packs", self.src)
         self.assertIn("Character strength (LLM) — 0% = profile soul only", self.src)
@@ -1539,6 +1542,34 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["calls"][0]["title"], "Persona Updated")
         self.assertIn("100%", data["calls"][0]["message"])
         self.assertFalse(data["noApi"])
+
+    def test_live_session_personality_refresh_plan(self):
+        slug = self.src[self.src.index("function slugifyName") : self.src.index("function nameTokens")]
+        helpers = self.src[self.src.index("// LIVE_SESSION_REFRESH_BEGIN") : self.src.index("// LIVE_SESSION_REFRESH_END") + len("// LIVE_SESSION_REFRESH_END")]
+        data = self._run_js_helpers(
+            slug + "\n" + helpers,
+            """
+            const calls = [];
+            const hostApi = { request: (method, params) => { calls.push({ method, params }); return Promise.resolve({}); } };
+            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', 'sess-runtime-1', hostApi);
+            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', 'sess-runtime-1', hostApi);
+            const cleared = refreshLiveSessionPersonalityPlan('none', 'sess-runtime-1', hostApi);
+            const draft = refreshLiveSessionPersonalityPlan('eric_cartman', null, hostApi);
+            const noRpc = refreshLiveSessionPersonalityPlan('eric_cartman', 'sess-runtime-1', {});
+            console.log(JSON.stringify({ apply, fromName, cleared, draft, noRpc }));
+            """,
+        )
+        self.assertTrue(data["apply"]["attempted"])
+        self.assertEqual(data["apply"]["payload"]["method"], "config.set")
+        self.assertEqual(data["apply"]["payload"]["params"]["key"], "personality")
+        self.assertEqual(data["apply"]["payload"]["params"]["value"], "eric_cartman")
+        self.assertEqual(data["apply"]["payload"]["params"]["session_id"], "sess-runtime-1")
+        self.assertEqual(data["fromName"]["payload"]["params"]["value"], "eric_cartman")
+        self.assertEqual(data["cleared"]["payload"]["params"]["value"], "none")
+        self.assertEqual(data["draft"]["skipped"], "no-session")
+        self.assertFalse(data["draft"]["attempted"])
+        self.assertEqual(data["noRpc"]["skipped"], "no-request")
+        self.assertFalse(data["noRpc"]["attempted"])
 
     def _run_js_helpers(self, helpers: str, body: str):
         import json

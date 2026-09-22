@@ -293,6 +293,50 @@ function notifyHost(kind, title, message, hostApi) {
 }
 // STUDIO_FORM_END
 
+// LIVE_SESSION_REFRESH_BEGIN
+function catalogPersonalityKey(value) {
+  const key = slugifyName(value);
+  if (!key || key === 'default' || key === 'none' || key === 'neutral') return 'none';
+  return key;
+}
+
+function refreshLiveSessionPersonalityPlan(personaKey, sessionId, hostApi) {
+  const sid = sessionId == null ? '' : String(sessionId).trim();
+  if (!sid) {
+    return { ok: true, attempted: false, skipped: 'no-session', payload: null };
+  }
+  if (!hostApi || typeof hostApi.request !== 'function') {
+    return { ok: true, attempted: false, skipped: 'no-request', payload: null };
+  }
+  return {
+    ok: true,
+    attempted: true,
+    skipped: '',
+    payload: {
+      method: 'config.set',
+      params: {
+        key: 'personality',
+        value: catalogPersonalityKey(personaKey),
+        session_id: sid
+      }
+    }
+  };
+}
+
+async function refreshLiveSessionPersonality(personaKey, hostApi) {
+  const api = hostApi !== undefined ? hostApi : (typeof host !== 'undefined' ? host : null);
+  const plan = refreshLiveSessionPersonalityPlan(personaKey, focusedSessionId(), api);
+  if (!plan.attempted || !plan.payload) return plan;
+  try {
+    await api.request(plan.payload.method, plan.payload.params);
+    return { ok: true, attempted: true, skipped: '' };
+  } catch (err) {
+    console.warn('[PersonaStudio] live personality refresh failed:', err);
+    return { ok: false, attempted: true, skipped: '', error: String((err && err.message) || err) };
+  }
+}
+// LIVE_SESSION_REFRESH_END
+
 function preferredProviderForPersona(persona, voices) {
   if (!persona) return 'voicebox';
   if (isFishProvider(persona.provider) && persona.voice_id && persona.voice_id !== 'default') {
@@ -381,8 +425,9 @@ function subscribeFocusedSession(onChange) {
  * 3. applyInProgress stays true across apply until session atoms settle
  *    (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
  * 4. Persona/clone apply and Standard Hermes clear do NOT call host.newChat.
- *    Hermes injects ephemeral personality at API-call time; the next turn in
- *    this chat picks up the style overlay + cloned TTS.
+ *    After companion apply/reset, refresh the focused live session via
+ *    host.request('config.set', { key:'personality', value, session_id })
+ *    so Desktop currentPersonality updates mid-session (no history reset).
  * 5. focusedSessionProfile change is per-profile Studio state (Promax Magellan):
  *    do not keep another profile's persona selected without applying it.
  *    A profile without its own active overlay becomes stock (no leaked TTS).
@@ -494,12 +539,17 @@ function clearApplyGate(overlay) {
   }
 }
 
-async function resetSessionOverlay(profile) {
+async function resetSessionOverlay(profile, options) {
   try {
     const res = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/session/reset`, {
       method: 'POST'
     });
-    return res.ok;
+    if (!res.ok) return false;
+    const refresh = await refreshLiveSessionPersonality('none');
+    if (!refresh.ok && refresh.attempted && options && options.notifyOnRefreshFailure) {
+      notifyHost('warning', 'Live session not refreshed', 'Stock Hermes restored in config, but this open chat may still use the previous personality until a new session.');
+    }
+    return true;
   } catch (err) {
     console.warn('[PersonaStudio] session reset failed:', err);
     return false;
@@ -642,7 +692,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       overlay.active = false;
       setActiveId('default');
       window.__ACTIVE_PERSONA_STUDIO__ = null;
-      await resetSessionOverlay(profile);
+      await resetSessionOverlay(profile, { notifyOnRefreshFailure: true });
     }
   }, []);
 
@@ -712,7 +762,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     if (selection.kind === 'default' || id === 'default') {
       beginApplyGate(overlayRef.current);
       try {
-        const ok = await resetSessionOverlay(profile);
+        const ok = await resetSessionOverlay(profile, { notifyOnRefreshFailure: true });
         if (ok) {
           overlayRef.current.active = false;
           overlayRef.current.profileId = profile;
@@ -792,10 +842,26 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       });
       applied = applyRes.ok;
       if (applyRes.ok) {
+        let applyData = {};
+        try { applyData = await applyRes.json(); } catch (_) { applyData = {}; }
         overlayRef.current.active = true;
         overlayRef.current.profileId = profile;
         overlayRef.current.sessionId = focusedSessionId();
         overlayRef.current.storedId = focusedStoredSessionId();
+        const appliedStrength = characterStrengthPercent(
+          applyData.character_strength != null ? applyData.character_strength : bundle.character_strength
+        );
+        const personaKey = appliedStrength <= 0
+          ? 'none'
+          : (applyData.persona || catalogPersonalityKey(bundle.name));
+        const refresh = await refreshLiveSessionPersonality(personaKey);
+        if (!refresh.ok && refresh.attempted) {
+          notifyHost(
+            'warning',
+            'Live session not refreshed',
+            `Applied ${personaKey} in config, but this open chat may still use the previous personality until a new session.`
+          );
+        }
       } else {
         console.warn('[PersonaStudio] Session apply failed');
         clearApplyGate(overlayRef.current);
