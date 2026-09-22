@@ -1382,7 +1382,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("refreshLiveSessionPersonality", select)
         self.assertIn("config.set", self.src)
         self.assertIn("requestProfile", self.src)
+        self.assertIn("profileRoutes", self.src)
         self.assertIn("host.request", self.src)
+        self.assertIn("bare profile string rejected", self.src)
         self.assertNotIn("🎙️ CLONES", self.src)
         self.assertIn("complete packs", self.src)
         self.assertIn("Character strength (LLM) — 0% = profile soul only", self.src)
@@ -1550,39 +1552,77 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         data = self._run_js_helpers(
             slug + "\n" + helpers,
             """
-            const state = {
+            const routes = [
+              { connectionId: 'conn-mechanic', mode: 'remote', profile: 'mechanic', targetProfile: 'mechanic' },
+              { connectionId: 'conn-critic', mode: 'local', profile: 'critic', targetProfile: 'critic' },
+              { connectionId: 'conn-mechanic-2', mode: 'local', profile: 'mechanic', targetProfile: 'mechanic' }
+            ];
+            const ownerState = {
               focusedSessionId: 'sess-runtime-1',
-              focusedSessionOwner: { profile: 'critic' },
+              focusedSessionOwner: { connectionId: 'conn-mechanic', profile: 'mechanic' },
               focusedSessionProfile: 'default'
             };
-            const hostApi = {
-              requestProfile: () => {},
-              request: () => {}
+            const criticState = {
+              focusedSessionId: 'sess-runtime-1',
+              focusedSessionOwner: { profile: 'critic' }
             };
-            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, state, 'default');
-            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', hostApi, state, 'default');
-            const cleared = refreshLiveSessionPersonalityPlan('none', hostApi, state, 'default');
+            const route = resolveFocusedProfileRouteFromList(routes, ownerState, 'mechanic');
+            const unique = resolveFocusedProfileRouteFromList(routes, criticState, 'critic');
+            const synthesized = resolveFocusedProfileRouteFromList(
+              [],
+              { focusedSessionOwner: { connectionId: 'conn-9', profile: 'mechanic' } },
+              'mechanic'
+            );
+            const ambiguous = resolveFocusedProfileRouteFromList(
+              routes,
+              { focusedSessionOwner: { profile: 'mechanic' } },
+              'mechanic'
+            );
+            const hostApi = { requestProfile: () => {}, request: () => {} };
+            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, ownerState, 'default', route, routes);
+            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', hostApi, ownerState, 'default', route, routes);
+            const cleared = refreshLiveSessionPersonalityPlan('none', hostApi, ownerState, 'default', route, routes);
             const fallbackRequest = refreshLiveSessionPersonalityPlan(
               'eric_cartman',
               { request: () => {} },
-              { activeSessionId: 'sess-active-2', focusedSessionProfile: 'mechanic' },
-              'default'
+              { activeSessionId: 'sess-active-2', focusedSessionProfile: 'mechanic', activeGatewayProfile: 'mechanic' },
+              'default',
+              null,
+              routes
             );
-            const draft = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, {}, 'critic');
-            const noRpc = refreshLiveSessionPersonalityPlan('eric_cartman', {}, state, 'critic');
+            const wrongGateway = refreshLiveSessionPersonalityPlan(
+              'eric_cartman',
+              { request: () => {}, requestProfile: () => {} },
+              { focusedSessionId: 'sess-3', focusedSessionProfile: 'mechanic', activeGatewayProfile: 'default' },
+              'default',
+              null,
+              routes
+            );
+            const draft = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, {}, 'critic', route, routes);
+            const noRpc = refreshLiveSessionPersonalityPlan('eric_cartman', {}, ownerState, 'critic', route, routes);
             const liveOk = interpretLiveSessionRefreshResult({ ok: true, info: { applied: true } });
             const bareSuccess = interpretLiveSessionRefreshResult({ ok: true });
             const historyOnly = interpretLiveSessionRefreshResult({ ok: true, history_reset: true });
+            const bareRoute = isFullProfileRoute('mechanic');
+            const fullOk = isFullProfileRoute(route);
             console.log(JSON.stringify({
-              apply, fromName, cleared, fallbackRequest, draft, noRpc, liveOk, bareSuccess, historyOnly
+              route, unique, synthesized, ambiguous,
+              apply, fromName, cleared, fallbackRequest, wrongGateway, draft, noRpc,
+              liveOk, bareSuccess, historyOnly, bareRoute, fullOk
             }));
             """,
         )
+        self.assertEqual(data["route"]["connectionId"], "conn-mechanic")
+        self.assertEqual(data["route"]["profile"], "mechanic")
+        self.assertEqual(data["unique"]["connectionId"], "conn-critic")
+        self.assertEqual(data["synthesized"]["connectionId"], "conn-9")
+        self.assertEqual(data["synthesized"]["mode"], "local")
+        self.assertIsNone(data["ambiguous"])
         self.assertTrue(data["apply"]["attempted"])
         self.assertEqual(data["apply"]["via"], "requestProfile")
-        self.assertEqual(data["apply"]["profile"], "critic")
+        self.assertEqual(data["apply"]["route"]["connectionId"], "conn-mechanic")
         self.assertEqual(data["apply"]["payload"]["method"], "config.set")
-        self.assertEqual(data["apply"]["payload"]["profile"], "critic")
+        self.assertEqual(data["apply"]["payload"]["route"]["targetProfile"], "mechanic")
         self.assertEqual(data["apply"]["payload"]["params"]["key"], "personality")
         self.assertEqual(data["apply"]["payload"]["params"]["value"], "eric_cartman")
         self.assertEqual(data["apply"]["payload"]["params"]["session_id"], "sess-runtime-1")
@@ -1590,7 +1630,8 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["cleared"]["payload"]["params"]["value"], "none")
         self.assertEqual(data["fallbackRequest"]["via"], "request")
         self.assertEqual(data["fallbackRequest"]["payload"]["params"]["session_id"], "sess-active-2")
-        self.assertEqual(data["fallbackRequest"]["payload"]["profile"], "mechanic")
+        self.assertEqual(data["wrongGateway"]["skipped"], "no-route")
+        self.assertFalse(data["wrongGateway"]["ok"])
         self.assertEqual(data["draft"]["skipped"], "no-session")
         self.assertFalse(data["draft"]["ok"])
         self.assertFalse(data["draft"]["attempted"])
@@ -1600,6 +1641,8 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertFalse(data["bareSuccess"]["ok"])
         self.assertFalse(data["historyOnly"]["ok"])
         self.assertIn("history_reset", data["historyOnly"]["error"])
+        self.assertFalse(data["bareRoute"])
+        self.assertTrue(data["fullOk"])
 
     def _run_js_helpers(self, helpers: str, body: str):
         import json

@@ -345,34 +345,170 @@ function interpretLiveSessionRefreshResult(result) {
   };
 }
 
-function refreshLiveSessionPersonalityPlan(personaKey, hostApi, state, fallbackProfile) {
+function focusedSessionOwnerRecord(state) {
+  const owner = readStateField(state, 'focusedSessionOwner');
+  return owner && typeof owner === 'object' ? owner : null;
+}
+
+function normalizeProfileRoute(route) {
+  if (!route || typeof route !== 'object' || Array.isArray(route)) return null;
+  const connectionId = String(route.connectionId || '').trim();
+  const profile = String(route.profile || route.targetProfile || '').trim();
+  const targetProfile = String(route.targetProfile || route.profile || '').trim();
+  if (!connectionId || !profile) return null;
+  return {
+    connectionId: connectionId,
+    mode: String(route.mode || 'local').trim() || 'local',
+    profile: profile,
+    targetProfile: targetProfile || profile
+  };
+}
+
+function isFullProfileRoute(route) {
+  return !!normalizeProfileRoute(route);
+}
+
+function matchProfileRoute(routes, owner, profileName) {
+  const list = (Array.isArray(routes) ? routes : []).map(normalizeProfileRoute).filter(Boolean);
+  const connectionId = owner && owner.connectionId ? String(owner.connectionId).trim() : '';
+  const wanted = String(profileName || (owner && (owner.profile || owner.profile_id)) || '').trim();
+  if (connectionId) {
+    const byConn = list.filter((route) => route.connectionId === connectionId);
+    if (wanted) {
+      const exact = byConn.find((route) => route.profile === wanted || route.targetProfile === wanted);
+      if (exact) return exact;
+    }
+    if (byConn.length === 1) return byConn[0];
+  }
+  if (wanted) {
+    const byName = list.filter((route) => route.profile === wanted || route.targetProfile === wanted);
+    if (byName.length === 1) return byName[0];
+  }
+  return null;
+}
+
+function synthesizeProfileRoute(owner, profileName) {
+  const profile = String(profileName || (owner && (owner.profile || owner.profile_id)) || '').trim();
+  const connectionId = owner && owner.connectionId ? String(owner.connectionId).trim() : '';
+  if (!connectionId || !profile) return null;
+  return {
+    connectionId: connectionId,
+    mode: String((owner && owner.mode) || 'local').trim() || 'local',
+    profile: profile,
+    targetProfile: profile
+  };
+}
+
+function resolveFocusedProfileRouteFromList(routes, state, profileName) {
+  const owner = focusedSessionOwnerRecord(state);
+  const wanted = String(profileName || resolveLiveSessionProfile(state, '') || '').trim();
+  return matchProfileRoute(routes, owner, wanted) || synthesizeProfileRoute(owner, wanted);
+}
+
+async function listProfileRoutes(api) {
+  if (!api || typeof api.profileRoutes !== 'function') return [];
+  try {
+    const listed = await api.profileRoutes();
+    if (Array.isArray(listed)) return listed;
+    if (listed && Array.isArray(listed.routes)) return listed.routes;
+  } catch (_) {}
+  return [];
+}
+
+async function resolveFocusedProfileRoute(api, state, profileName) {
+  const routes = await listProfileRoutes(api);
+  return resolveFocusedProfileRouteFromList(routes, state, profileName);
+}
+
+function resolveActiveGatewayProfile(state, routes) {
+  const fromState = readStateField(state, 'activeGatewayProfile')
+    || readStateField(state, 'activeSessionProfile')
+    || readStateField(state, 'activeProfile');
+  if (fromState) return String(fromState).trim();
+  const raw = (Array.isArray(routes) ? routes : []).find((route) => route && (route.active || route.isActive || route.current));
+  if (raw) {
+    const normalized = normalizeProfileRoute(raw);
+    if (normalized) return normalized.targetProfile || normalized.profile;
+  }
+  return '';
+}
+
+function refreshLiveSessionPersonalityPlan(personaKey, hostApi, state, fallbackProfile, route, routes) {
   const sid = resolveLiveSessionId(state);
   const profile = resolveLiveSessionProfile(state, fallbackProfile);
+  const fullRoute = normalizeProfileRoute(route);
   if (!sid) {
-    return { ok: false, attempted: false, skipped: 'no-session', payload: null, via: '', profile: profile };
+    return { ok: false, attempted: false, skipped: 'no-session', payload: null, via: '', profile: profile, route: null };
   }
-  const canProfile = !!profile && hostApi && typeof hostApi.requestProfile === 'function';
-  const canRequest = hostApi && typeof hostApi.request === 'function';
-  if (!canProfile && !canRequest) {
-    return { ok: false, attempted: false, skipped: 'no-request', payload: null, via: '', profile: profile };
-  }
-  const via = canProfile ? 'requestProfile' : 'request';
-  return {
-    ok: true,
-    attempted: true,
-    skipped: '',
-    via: via,
-    profile: profile,
-    payload: {
-      method: 'config.set',
-      profile: profile,
-      params: {
-        key: 'personality',
-        value: catalogPersonalityKey(personaKey),
-        session_id: sid
+  const canProfile = !!fullRoute && hostApi && typeof hostApi.requestProfile === 'function';
+  const activeGw = resolveActiveGatewayProfile(state, routes);
+  const gatewaySafe = !profile || (!!activeGw && activeGw === profile);
+  const canRequest = hostApi && typeof hostApi.request === 'function' && gatewaySafe;
+  if (canProfile) {
+    return {
+      ok: true,
+      attempted: true,
+      skipped: '',
+      via: 'requestProfile',
+      profile: fullRoute.profile,
+      route: fullRoute,
+      payload: {
+        method: 'config.set',
+        profile: fullRoute.profile,
+        route: fullRoute,
+        params: {
+          key: 'personality',
+          value: catalogPersonalityKey(personaKey),
+          session_id: sid
+        }
       }
+    };
+  }
+  if (canRequest) {
+    return {
+      ok: true,
+      attempted: true,
+      skipped: '',
+      via: 'request',
+      profile: profile,
+      route: null,
+      payload: {
+        method: 'config.set',
+        profile: profile,
+        route: null,
+        params: {
+          key: 'personality',
+          value: catalogPersonalityKey(personaKey),
+          session_id: sid
+        }
+      }
+    };
+  }
+  const skipped = (hostApi && typeof hostApi.requestProfile === 'function' && !fullRoute)
+    ? 'no-route'
+    : ((hostApi && typeof hostApi.request === 'function' && !gatewaySafe) ? 'wrong-gateway' : 'no-request');
+  return { ok: false, attempted: false, skipped: skipped, payload: null, via: '', profile: profile, route: null };
+}
+
+async function dispatchLivePersonalityRefresh(api, plan) {
+  if (!plan || !plan.attempted || !plan.payload) return plan || { ok: false, attempted: false, skipped: 'no-plan' };
+  try {
+    if (plan.via === 'requestProfile') {
+      if (typeof plan.route === 'string' || !isFullProfileRoute(plan.route)) {
+        return { ok: false, attempted: true, skipped: '', error: 'bare profile string rejected' };
+      }
+      const result = await api.requestProfile(plan.route, plan.payload.method, plan.payload.params);
+      return interpretLiveSessionRefreshResult(result);
     }
-  };
+    if (!api || typeof api.request !== 'function') {
+      return { ok: false, attempted: false, skipped: 'no-request' };
+    }
+    const result = await api.request(plan.payload.method, plan.payload.params);
+    return interpretLiveSessionRefreshResult(result);
+  } catch (err) {
+    console.warn('[PersonaStudio] live personality refresh failed:', err);
+    return { ok: false, attempted: true, skipped: '', error: String((err && err.message) || err) };
+  }
 }
 
 async function refreshLiveSessionPersonality(personaKey, hostApi) {
@@ -380,17 +516,11 @@ async function refreshLiveSessionPersonality(personaKey, hostApi) {
   const state = (api && api.state) || (typeof host !== 'undefined' && host && host.state) || {};
   let fallback = '';
   try { fallback = focusedProfile(); } catch (_) { fallback = ''; }
-  const plan = refreshLiveSessionPersonalityPlan(personaKey, api, state, fallback);
-  if (!plan.attempted || !plan.payload) return plan;
-  try {
-    const result = plan.via === 'requestProfile'
-      ? await api.requestProfile(plan.profile, plan.payload.method, plan.payload.params)
-      : await api.request(plan.payload.method, plan.payload.params);
-    return interpretLiveSessionRefreshResult(result);
-  } catch (err) {
-    console.warn('[PersonaStudio] live personality refresh failed:', err);
-    return { ok: false, attempted: true, skipped: '', error: String((err && err.message) || err) };
-  }
+  const profileName = resolveLiveSessionProfile(state, fallback);
+  const routes = await listProfileRoutes(api);
+  const route = resolveFocusedProfileRouteFromList(routes, state, profileName);
+  const plan = refreshLiveSessionPersonalityPlan(personaKey, api, state, fallback, route, routes);
+  return dispatchLivePersonalityRefresh(api, plan);
 }
 // LIVE_SESSION_REFRESH_END
 
@@ -483,10 +613,10 @@ function subscribeFocusedSession(onChange) {
  *    (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
  * 4. Persona/clone apply and Standard Hermes clear do NOT call host.newChat.
  *    After companion apply/reset, refresh the focused live session via
- *    host.requestProfile(targetProfile, 'config.set', { key:'personality', value, session_id })
- *    (fall back to host.request only if requestProfile is missing). Tab/tile
- *    focus can move without swapping the active gateway socket — do not assume
- *    host.request hits the focused profile. Live-applied only if result.info != null.
+ *    host.requestProfile(fullRoute, 'config.set', { key:'personality', value, session_id })
+ *    where fullRoute comes from host.profileRoutes() (never a bare profile
+ *    string). Fall back to host.request only when the focused profile matches
+ *    the active gateway profile (or is empty). Live-applied only if result.info != null.
  * 5. focusedSessionProfile change is per-profile Studio state (Promax Magellan):
  *    do not keep another profile's persona selected without applying it.
  *    A profile without its own active overlay becomes stock (no leaked TTS).
