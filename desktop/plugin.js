@@ -420,8 +420,15 @@ async function resolveFocusedProfileRoute(api, state, profileName) {
   return resolveFocusedProfileRouteFromList(routes, state, profileName);
 }
 
+function profileNamesMatch(left, right) {
+  const a = String(left || '').trim().toLowerCase();
+  const b = String(right || '').trim().toLowerCase();
+  return !!a && a === b;
+}
+
 function resolveActiveGatewayProfile(state, routes) {
-  const fromState = readStateField(state, 'activeGatewayProfile')
+  const fromState = readStateField(state, 'profile')
+    || readStateField(state, 'activeGatewayProfile')
     || readStateField(state, 'activeSessionProfile')
     || readStateField(state, 'activeProfile');
   if (fromState) return String(fromState).trim();
@@ -433,6 +440,13 @@ function resolveActiveGatewayProfile(state, routes) {
   return '';
 }
 
+function isGatewaySafe(profile, activeGw, route) {
+  if (!profile) return true;
+  if (profileNamesMatch(profile, activeGw)) return true;
+  if (activeGw) return false;
+  return !!(route && (profileNamesMatch(profile, route.profile) || profileNamesMatch(profile, route.targetProfile)));
+}
+
 function refreshLiveSessionPersonalityPlan(personaKey, hostApi, state, fallbackProfile, route, routes) {
   const sid = resolveLiveSessionId(state);
   const profile = resolveLiveSessionProfile(state, fallbackProfile);
@@ -442,8 +456,29 @@ function refreshLiveSessionPersonalityPlan(personaKey, hostApi, state, fallbackP
   }
   const canProfile = !!fullRoute && hostApi && typeof hostApi.requestProfile === 'function';
   const activeGw = resolveActiveGatewayProfile(state, routes);
-  const gatewaySafe = !profile || (!!activeGw && activeGw === profile);
+  const gatewaySafe = isGatewaySafe(profile, activeGw, fullRoute);
   const canRequest = hostApi && typeof hostApi.request === 'function' && gatewaySafe;
+  const params = {
+    key: 'personality',
+    value: catalogPersonalityKey(personaKey),
+    session_id: sid
+  };
+  if (canRequest) {
+    return {
+      ok: true,
+      attempted: true,
+      skipped: '',
+      via: 'request',
+      profile: profile,
+      route: fullRoute,
+      payload: {
+        method: 'config.set',
+        profile: profile,
+        route: fullRoute,
+        params: params
+      }
+    };
+  }
   if (canProfile) {
     return {
       ok: true,
@@ -456,31 +491,7 @@ function refreshLiveSessionPersonalityPlan(personaKey, hostApi, state, fallbackP
         method: 'config.set',
         profile: fullRoute.profile,
         route: fullRoute,
-        params: {
-          key: 'personality',
-          value: catalogPersonalityKey(personaKey),
-          session_id: sid
-        }
-      }
-    };
-  }
-  if (canRequest) {
-    return {
-      ok: true,
-      attempted: true,
-      skipped: '',
-      via: 'request',
-      profile: profile,
-      route: null,
-      payload: {
-        method: 'config.set',
-        profile: profile,
-        route: null,
-        params: {
-          key: 'personality',
-          value: catalogPersonalityKey(personaKey),
-          session_id: sid
-        }
+        params: params
       }
     };
   }
@@ -612,11 +623,11 @@ function subscribeFocusedSession(onChange) {
  * 3. applyInProgress stays true across apply until session atoms settle
  *    (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
  * 4. Persona/clone apply and Standard Hermes clear do NOT call host.newChat.
- *    After companion apply/reset, refresh the focused live session via
- *    host.requestProfile(fullRoute, 'config.set', { key:'personality', value, session_id })
- *    where fullRoute comes from host.profileRoutes() (never a bare profile
- *    string). Fall back to host.request only when the focused profile matches
- *    the active gateway profile (or is empty). Live-applied only if result.info != null.
+ *    After companion apply/reset, refresh the focused live session.
+ *    Prefer ambient host.request when the focused profile matches
+ *    host.state.profile (active gateway). Use requestProfile(fullRoute)
+ *    only when that is not gateway-safe. Never pass a bare profile string.
+ *    Live-applied only if result.info != null.
  * 5. focusedSessionProfile change is per-profile Studio state (Promax Magellan):
  *    do not keep another profile's persona selected without applying it.
  *    A profile without its own active overlay becomes stock (no leaked TTS).
@@ -1019,6 +1030,8 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
 
     beginApplyGate(overlayRef.current);
     let applied = false;
+    let liveRefreshed = false;
+    let refreshNote = '';
     try {
       const applyRes = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/session/apply`, {
         method: 'POST',
@@ -1048,11 +1061,13 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
           ? 'none'
           : (applyData.persona || catalogPersonalityKey(bundle.name));
         const refresh = await refreshLiveSessionPersonality(personaKey);
+        liveRefreshed = !!refresh.ok;
+        refreshNote = refresh.skipped || refresh.error || '';
         if (!refresh.ok) {
           notifyHost(
             'warning',
             'Live session not refreshed',
-            `Applied ${personaKey} in config, but this open chat may still use the previous personality (${refresh.skipped || refresh.error || 'refresh failed'}).`
+            `Applied ${personaKey} in config only — this open chat may still use the previous personality (${refreshNote || 'refresh failed'}).`
           );
         }
       } else {
@@ -1065,13 +1080,25 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     }
 
     const ttsLabel = providerLabel(boundProvider);
-    notifyHost(
-      applied ? 'success' : 'error',
-      `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
-      applied
-        ? `Style + ${ttsLabel} voice on this chat — next reply picks it up. New Chat returns to stock.`
-        : `Failed to apply speaking persona on "${profile}"`
-    );
+    if (applied && liveRefreshed) {
+      notifyHost(
+        'success',
+        `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
+        `Live session refreshed — next reply in this chat uses ${bundle.name} + ${ttsLabel}. New Chat returns to stock.`
+      );
+    } else if (applied) {
+      notifyHost(
+        'warning',
+        `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
+        `Config only — ${bundle.name} is saved, but this open chat was not live-refreshed${refreshNote ? ` (${refreshNote})` : ''}.`
+      );
+    } else {
+      notifyHost(
+        'error',
+        `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
+        `Failed to apply speaking persona on "${profile}"`
+      );
+    }
 
     window.__ACTIVE_PERSONA_STUDIO__ = applied
       ? { ...bundle, apply_provider: boundProvider, apply_voice_id: boundVoiceId, apply_reason: resolveReason, scope: 'session' }

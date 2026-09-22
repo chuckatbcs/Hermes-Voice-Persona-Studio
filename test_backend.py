@@ -1380,6 +1380,8 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("syncTitlebarToFocusedProfile", self.src)
         self.assertIn("character_strength", select)
         self.assertIn("refreshLiveSessionPersonality", select)
+        self.assertIn("Live session refreshed", select)
+        self.assertIn("config only", select)
         self.assertIn("config.set", self.src)
         self.assertIn("requestProfile", self.src)
         self.assertIn("profileRoutes", self.src)
@@ -1579,25 +1581,35 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               'mechanic'
             );
             const hostApi = { requestProfile: () => {}, request: () => {} };
-            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, ownerState, 'default', route, routes);
-            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', hostApi, ownerState, 'default', route, routes);
-            const cleared = refreshLiveSessionPersonalityPlan('none', hostApi, ownerState, 'default', route, routes);
+            const sameGatewayState = { ...ownerState, profile: 'Mechanic' };
+            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, sameGatewayState, 'default', route, routes);
+            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', hostApi, sameGatewayState, 'default', route, routes);
+            const cleared = refreshLiveSessionPersonalityPlan('none', hostApi, sameGatewayState, 'default', route, routes);
             const fallbackRequest = refreshLiveSessionPersonalityPlan(
               'eric_cartman',
               { request: () => {} },
-              { activeSessionId: 'sess-active-2', focusedSessionProfile: 'mechanic', activeGatewayProfile: 'mechanic' },
+              { activeSessionId: 'sess-active-2', focusedSessionProfile: 'mechanic', profile: 'mechanic' },
               'default',
               null,
+              routes
+            );
+            const mismatched = refreshLiveSessionPersonalityPlan(
+              'eric_cartman',
+              hostApi,
+              { focusedSessionId: 'sess-3', focusedSessionOwner: { connectionId: 'conn-mechanic', profile: 'mechanic' }, profile: 'critic' },
+              'default',
+              route,
               routes
             );
             const wrongGateway = refreshLiveSessionPersonalityPlan(
               'eric_cartman',
               { request: () => {}, requestProfile: () => {} },
-              { focusedSessionId: 'sess-3', focusedSessionProfile: 'mechanic', activeGatewayProfile: 'default' },
+              { focusedSessionId: 'sess-3', focusedSessionProfile: 'mechanic', profile: 'default' },
               'default',
               null,
               routes
             );
+            const activeFromProfileAtom = resolveActiveGatewayProfile({ profile: 'Mechanic' }, routes);
             const draft = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, {}, 'critic', route, routes);
             const noRpc = refreshLiveSessionPersonalityPlan('eric_cartman', {}, ownerState, 'critic', route, routes);
             const liveOk = interpretLiveSessionRefreshResult({ ok: true, info: { applied: true } });
@@ -1607,8 +1619,8 @@ class TestPluginSessionWatchRace(unittest.TestCase):
             const fullOk = isFullProfileRoute(route);
             console.log(JSON.stringify({
               route, unique, synthesized, ambiguous,
-              apply, fromName, cleared, fallbackRequest, wrongGateway, draft, noRpc,
-              liveOk, bareSuccess, historyOnly, bareRoute, fullOk
+              apply, fromName, cleared, fallbackRequest, mismatched, wrongGateway, draft, noRpc,
+              liveOk, bareSuccess, historyOnly, bareRoute, fullOk, activeFromProfileAtom
             }));
             """,
         )
@@ -1619,10 +1631,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["synthesized"]["mode"], "local")
         self.assertIsNone(data["ambiguous"])
         self.assertTrue(data["apply"]["attempted"])
-        self.assertEqual(data["apply"]["via"], "requestProfile")
+        self.assertEqual(data["apply"]["via"], "request")
         self.assertEqual(data["apply"]["route"]["connectionId"], "conn-mechanic")
         self.assertEqual(data["apply"]["payload"]["method"], "config.set")
-        self.assertEqual(data["apply"]["payload"]["route"]["targetProfile"], "mechanic")
         self.assertEqual(data["apply"]["payload"]["params"]["key"], "personality")
         self.assertEqual(data["apply"]["payload"]["params"]["value"], "eric_cartman")
         self.assertEqual(data["apply"]["payload"]["params"]["session_id"], "sess-runtime-1")
@@ -1630,7 +1641,10 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["cleared"]["payload"]["params"]["value"], "none")
         self.assertEqual(data["fallbackRequest"]["via"], "request")
         self.assertEqual(data["fallbackRequest"]["payload"]["params"]["session_id"], "sess-active-2")
+        self.assertEqual(data["mismatched"]["via"], "requestProfile")
+        self.assertEqual(data["mismatched"]["route"]["connectionId"], "conn-mechanic")
         self.assertEqual(data["wrongGateway"]["skipped"], "no-route")
+        self.assertEqual(data["activeFromProfileAtom"], "Mechanic")
         self.assertFalse(data["wrongGateway"]["ok"])
         self.assertEqual(data["draft"]["skipped"], "no-session")
         self.assertFalse(data["draft"]["ok"])
