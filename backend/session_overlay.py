@@ -7,8 +7,10 @@ cached when a chat starts. Dropdown apply therefore:
 1. Stashes the pre-apply personality + TTS selection.
 2. Writes the overlay so *this* chat (refreshed via ``host.newChat``) can speak
    as the chosen persona.
-3. Restores the stash on the next user-initiated new session so brand-new chats
-   return to stock Hermes and Studio never becomes the implicit default.
+3. Restores the stash on the next user-initiated new session. Unusable stash
+   (missing, Voicebox ``default``) falls back to Nous stock TTS:
+   ``tts.provider: edge`` + ``tts.edge.voice: en-US-AriaNeural``.
+   Never Voicebox Jarvis, never ``voice: default``, never a Studio clone as stock.
 
 This module never patches ``~/.hermes/hermes-agent``.
 """
@@ -26,10 +28,16 @@ from .paths import config_path_for_profile, session_state_path
 STASH_KEYS = (
     "display.personality",
     "tts.provider",
+    "tts.edge.voice",
     "tts.providers.fish.voice",
     "tts.providers.fish.command",
     "tts.providers.voicebox.voice",
 )
+
+# Nous Hermes clean-install defaults (config_defaults.py / tools/tts_tool.py).
+# Voicebox, Fish, Jarvis, and Cartman are optional add-ons, not stock.
+STOCK_TTS_PROVIDER = "edge"
+STOCK_EDGE_VOICE = "en-US-AriaNeural"
 
 
 def _empty_state() -> Dict[str, Any]:
@@ -74,11 +82,80 @@ def overlay_status(profile_id: str, *, state_path: Optional[Path] = None) -> Dic
     }
 
 
-def _clear_studio_personality_selection(cfg_path: Path) -> bool:
-    """Clear a Studio-tagged display.personality without touching TTS.
+def stock_edge_updates() -> Dict[str, Any]:
+    return {
+        "tts.provider": STOCK_TTS_PROVIDER,
+        "tts.edge.voice": STOCK_EDGE_VOICE,
+    }
 
-    Used when a leftover sticky overlay exists from an older apply that never
-    wrote a session stash. Mechanic Fish binds must stay put.
+
+def _already_edge_stock(cfg: Dict[str, Any]) -> bool:
+    provider = str(get_dotted(cfg, "tts.provider") or "").strip().lower()
+    voice = get_dotted(cfg, "tts.edge.voice")
+    return provider == "edge" and not bot_profiles.is_placeholder_voice_id(voice)
+
+
+def _hermes_stock_tts_updates(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """First-run / no-stash stock: Edge AriaNeural. Never Voicebox Jarvis or ``default``."""
+    if _already_edge_stock(cfg):
+        return {}
+    return stock_edge_updates()
+
+
+def _stash_restore_updates(stash: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Restore pre-apply TTS when usable; otherwise Hermes Edge stock.
+
+    Never writes Voicebox ``voice: default``, a Studio clone id as stock, or
+    an invented Jarvis UUID. Promax session 20260922_094441_564b69: a
+    placeholder Voicebox id made command TTS 404 and play no audio.
+    """
+    updates: Dict[str, Any] = {}
+    if "display.personality" in stash:
+        val = stash.get("display.personality")
+        updates["display.personality"] = "" if val is None else val
+    else:
+        updates["display.personality"] = ""
+
+    provider = str(stash.get("tts.provider") or "").strip().lower()
+    edge_voice = stash.get("tts.edge.voice")
+    fish_voice = stash.get("tts.providers.fish.voice")
+    fish_cmd = stash.get("tts.providers.fish.command")
+    vb_voice = stash.get("tts.providers.voicebox.voice")
+
+    if provider in ("edge",) or (
+        not provider and not bot_profiles.is_placeholder_voice_id(edge_voice)
+    ):
+        updates["tts.provider"] = "edge"
+        updates["tts.edge.voice"] = (
+            edge_voice
+            if not bot_profiles.is_placeholder_voice_id(edge_voice)
+            else STOCK_EDGE_VOICE
+        )
+        return updates
+
+    if provider in ("fish", "fish_audio") and not bot_profiles.is_placeholder_voice_id(fish_voice):
+        updates["tts.provider"] = "fish"
+        updates["tts.providers.fish.voice"] = fish_voice
+        if fish_cmd not in (None, ""):
+            updates["tts.providers.fish.command"] = fish_cmd
+        return updates
+
+    if provider == "voicebox" and bot_profiles.is_usable_voicebox_voice_id(vb_voice):
+        updates["tts.provider"] = "voicebox"
+        updates["tts.providers.voicebox.voice"] = vb_voice
+        return updates
+
+    # Stash missing, ``default``, empty, or non-UUID Voicebox: Edge stock,
+    # unless the live file is already Edge.
+    updates.update(_hermes_stock_tts_updates(cfg))
+    return updates
+
+
+def _clear_studio_personality_selection(cfg_path: Path) -> bool:
+    """Clear a Studio-tagged display.personality without assuming TTS.
+
+    TTS is handled separately: stash restore, or Edge stock when there is
+    no usable stash. Never invent Voicebox Jarvis as stock.
     """
     if not cfg_path.exists():
         return False
@@ -170,11 +247,18 @@ def reset_session_overlay(
 
     stash = entry.get("stash") if isinstance(entry.get("stash"), dict) else None
     if stash and path.exists():
-        updates = {key: stash.get(key) for key in STASH_KEYS}
-        update_config_keys(path, updates)
-        restored_keys = list(STASH_KEYS)
+        cfg = load_yaml(path)
+        updates = _stash_restore_updates(stash, cfg)
+        if updates:
+            update_config_keys(path, updates)
+            restored_keys = list(updates.keys())
     elif path.exists():
         leftover_cleared = _clear_studio_personality_selection(path)
+        cfg = load_yaml(path)
+        stock = _hermes_stock_tts_updates(cfg)
+        if stock:
+            update_config_keys(path, stock)
+            restored_keys = list(stock.keys())
 
     if profile_id in (state.get("profiles") or {}):
         del state["profiles"][profile_id]
@@ -211,13 +295,24 @@ def reset_all_session_overlays(*, state_path: Optional[Path] = None) -> Dict[str
         if not pid or pid in seen:
             continue
         cfg_path = config_path_for_profile(pid)
-        if _clear_studio_personality_selection(cfg_path):
+        leftover_cleared = _clear_studio_personality_selection(cfg_path)
+        placeholder_fix: Dict[str, Any] = {}
+        if cfg_path.exists():
+            cfg = load_yaml(cfg_path)
+            provider = str(get_dotted(cfg, "tts.provider") or "").strip().lower()
+            vb_voice = get_dotted(cfg, "tts.providers.voicebox.voice")
+            if provider in ("", "voicebox") and not bot_profiles.is_usable_voicebox_voice_id(vb_voice):
+                if provider == "voicebox" or bot_profiles.is_placeholder_voice_id(vb_voice):
+                    placeholder_fix = _hermes_stock_tts_updates(cfg)
+                    if placeholder_fix:
+                        update_config_keys(cfg_path, placeholder_fix)
+        if leftover_cleared or placeholder_fix:
             reports.append({
                 "ok": True,
                 "profile_id": pid,
-                "restored": False,
-                "restored_keys": [],
-                "leftover_personality_cleared": True,
+                "restored": bool(placeholder_fix),
+                "restored_keys": list(placeholder_fix.keys()),
+                "leftover_personality_cleared": leftover_cleared,
                 "active": False,
             })
 

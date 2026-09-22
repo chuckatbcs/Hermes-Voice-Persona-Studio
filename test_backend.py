@@ -429,7 +429,7 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         result = bot_profiles.assign_voice_to_profile(
             "default",
             "voicebox",
-            "clone-uuid",
+            "c9da87b0-19be-49c4-ab44-01cb7943f5c4",
             "Cartman",
             cfg_path=cfg,
         )
@@ -437,7 +437,7 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(data["model"], "keep-me")
         self.assertEqual(data["tts"]["provider"], "voicebox")
-        self.assertEqual(data["tts"]["providers"]["voicebox"]["voice"], "clone-uuid")
+        self.assertEqual(data["tts"]["providers"]["voicebox"]["voice"], "c9da87b0-19be-49c4-ab44-01cb7943f5c4")
         self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "old_voice")
         self.assertEqual(data["agent"]["max_turns"], 12)
 
@@ -453,7 +453,7 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         cfg = self._write_config()
         bot_profiles.set_profile_persona("default", "Jarvis", "You are Jarvis.", cfg_path=cfg)
         bot_profiles.assign_voice_to_profile(
-            "default", "voicebox", "clone-uuid", "Jarvis", cfg_path=cfg
+            "default", "voicebox", "c9da87b0-19be-49c4-ab44-01cb7943f5c4", "Jarvis", cfg_path=cfg
         )
         index_path = self.home / "personas" / ".studio-managed.json"
         self.assertTrue(index_path.exists())
@@ -548,7 +548,7 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(restored["display"]["personality"], "")
         self.assertEqual(restored["tts"]["providers"]["fish"]["voice"], "mechanic_default")
 
-    def test_reset_without_stash_clears_studio_personality_only(self):
+    def test_reset_without_stash_uses_edge_stock_not_studio_clone(self):
         from backend import session_overlay
 
         cfg = self._write_config()
@@ -558,12 +558,15 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         bot_profiles.assign_voice_to_profile(
             "default", "fish_audio", "cartman-id", "Hermes eric_cartman", cfg_path=cfg
         )
-        # No session stash: leftover sticky overlay from an older apply.
         reset = session_overlay.reset_session_overlay("default", cfg_path=cfg)
-        self.assertTrue(reset["leftover_personality_cleared"])
+        self.assertTrue(reset["leftover_personality_cleared"] or reset["restored"])
         data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(data["display"]["personality"], "")
-        self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "hermes_eric_cartman")
+        self.assertEqual(data["tts"]["provider"], "edge")
+        self.assertEqual(data["tts"]["edge"]["voice"], "en-US-AriaNeural")
+        fish_voice = ((data.get("tts") or {}).get("providers") or {}).get("fish") or {}
+        self.assertNotEqual(data["tts"]["provider"], "voicebox")
+        self.assertNotEqual(fish_voice.get("voice"), "default")
 
     def test_reset_all_clears_active_overlay(self):
         from backend import session_overlay
@@ -583,6 +586,74 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(data["display"]["personality"], "")
         self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "mechanic_default")
+
+    def test_reset_does_not_write_voicebox_default(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            cfg_path=cfg,
+        )
+        state = session_overlay.load_session_state()
+        state["profiles"]["default"]["stash"] = {
+            "display.personality": "",
+            "tts.provider": "voicebox",
+            "tts.providers.voicebox.voice": "default",
+            "tts.providers.fish.voice": None,
+            "tts.edge.voice": None,
+        }
+        session_overlay.save_session_state(state)
+        session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        vb = ((data.get("tts") or {}).get("providers") or {}).get("voicebox") or {}
+        self.assertNotEqual(vb.get("voice"), "default")
+        self.assertEqual(data["tts"]["provider"], "edge")
+        self.assertEqual(data["tts"]["edge"]["voice"], "en-US-AriaNeural")
+
+    def test_edge_stash_restores_aria_not_jarvis(self):
+        from backend import session_overlay
+
+        cfg = self.home / "config.yaml"
+        cfg.write_text(
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: ''\n",
+            encoding="utf-8",
+        )
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Jarvis",
+            persona_prompt="You are Jarvis.",
+            provider="voicebox",
+            voice_id="f2cb3bdc-de82-4d31-9a82-b2b637800a31",
+            voice_name="Jarvis",
+            cfg_path=cfg,
+        )
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(after["tts"]["provider"], "voicebox")
+        session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(restored["display"]["personality"], "")
+        self.assertEqual(restored["tts"]["provider"], "edge")
+        self.assertEqual(restored["tts"]["edge"]["voice"], "en-US-AriaNeural")
+        vb = ((restored.get("tts") or {}).get("providers") or {}).get("voicebox") or {}
+        self.assertNotEqual(vb.get("voice"), "default")
+
+    def test_assign_voicebox_rejects_default_id(self):
+        cfg = self._write_config()
+        with self.assertRaises(ValueError):
+            bot_profiles.assign_voice_to_profile(
+                "default", "voicebox", "default", "Default", cfg_path=cfg
+            )
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):

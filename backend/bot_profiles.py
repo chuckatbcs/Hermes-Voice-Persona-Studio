@@ -15,6 +15,25 @@ from .managed_index import SOURCE_TAG, remember_writes
 from .paths import config_path_for_profile, hermes_home, profiles_dir
 from .persona_sync import slugify_persona_id
 
+_PLACEHOLDER_VOICE_IDS = frozenset({"", "default", "none", "null", "undefined"})
+_VOICEBOX_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def is_placeholder_voice_id(value: Any) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    return not text or text.lower() in _PLACEHOLDER_VOICE_IDS
+
+
+def is_usable_voicebox_voice_id(value: Any) -> bool:
+    """Voicebox command TTS needs a real profile UUID, never ``default``."""
+    if is_placeholder_voice_id(value):
+        return False
+    return bool(_VOICEBOX_UUID.match(str(value).strip()))
+
 
 def list_bot_profiles() -> List[Dict[str, Any]]:
     """Return all available Hermes bot profiles with their display titles and current voices."""
@@ -26,13 +45,17 @@ def list_bot_profiles() -> List[Dict[str, Any]]:
         try:
             c = load_yaml(def_cfg)
             tts = c.get("tts", {}) or {}
-            tts_prov = tts.get("provider", "voicebox")
-            prov_cfg = (tts.get("providers", {}) or {}).get(tts_prov, {}) or {}
+            tts_prov = tts.get("provider")
+            if (tts_prov or "").strip().lower() == "edge":
+                current_voice = (tts.get("edge") or {}).get("voice")
+            else:
+                prov_cfg = (tts.get("providers", {}) or {}).get(tts_prov or "", {}) or {}
+                current_voice = prov_cfg.get("voice")
             profiles.append({
                 "id": "default",
                 "title": "Default Assistant",
                 "provider": tts_prov,
-                "voice": prov_cfg.get("voice", "default"),
+                "voice": current_voice,
             })
         except Exception as e:
             print(f"[Profiles] Error reading default config: {e}")
@@ -61,8 +84,11 @@ def list_bot_profiles() -> List[Dict[str, Any]]:
                     c = load_yaml(c_path)
                     tts = c.get("tts", {}) or {}
                     tts_prov = tts.get("provider")
-                    prov_cfg = (tts.get("providers", {}) or {}).get(tts_prov or "", {}) or {}
-                    current_voice = prov_cfg.get("voice")
+                    if (tts_prov or "").strip().lower() == "edge":
+                        current_voice = (tts.get("edge") or {}).get("voice")
+                    else:
+                        prov_cfg = (tts.get("providers", {}) or {}).get(tts_prov or "", {}) or {}
+                        current_voice = prov_cfg.get("voice")
                 except Exception:
                     pass
 
@@ -105,6 +131,11 @@ def _tts_updates_for_voice(cfg: Dict[str, Any], provider: str, voice_id: str, vo
                     r"--fish-label\s+\S+", f"--fish-label {clean_name}", cmd
                 )
     else:
+        if not is_usable_voicebox_voice_id(voice_id):
+            raise ValueError(
+                f"Refusing to write Voicebox voice id {voice_id!r}; "
+                "Voicebox requires a real profile UUID (not 'default')"
+            )
         vb_cfg = get_dotted(cfg, "tts.providers.voicebox") or {}
         if not isinstance(vb_cfg, dict) or not vb_cfg:
             updates["tts.providers.voicebox"] = {
