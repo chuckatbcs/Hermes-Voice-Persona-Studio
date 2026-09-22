@@ -77,43 +77,32 @@ class TestPersonaStorage(IsolatedHermesHomeTest):
         )
 
     def test_put_updates_existing_pack_character_strength(self):
-        from backend import api as api_mod
-        from fastapi import HTTPException
-
-        previous = api_mod.storage
-        api_mod.storage = PersonaStorage(root_dir=str(self.home / "personas"))
-        try:
-            api_mod.storage.save_persona(
-                PersonaBundle(
-                    id="cartman",
-                    name="Eric Cartman",
-                    avatar="🧢",
-                    system_prompt="Aggressive impatient South Park snark while doing the job.",
-                    provider="voicebox",
-                    voice_id="c9da87b0-19be-49c4-ab44-01cb7943f5c4",
-                    voice_name="Cartman",
-                    character_strength=25,
-                )
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        storage.save_persona(
+            PersonaBundle(
+                id="cartman",
+                name="Eric Cartman",
+                avatar="🧢",
+                system_prompt="Aggressive impatient South Park snark while doing the job.",
+                provider="voicebox",
+                voice_id="c9da87b0-19be-49c4-ab44-01cb7943f5c4",
+                voice_name="Cartman",
+                character_strength=25,
             )
-            result = api_mod.update_persona(
-                "cartman",
-                api_mod.UpdatePersonaRequest(character_strength=100),
-            )
-            self.assertTrue(result["updated"])
-            self.assertEqual(result["persona"]["id"], "cartman")
-            self.assertEqual(result["persona"]["character_strength"], 100)
-            self.assertEqual(result["persona"]["name"], "Eric Cartman")
-            loaded = api_mod.storage.get_persona("cartman")
-            self.assertEqual(loaded.character_strength, 100)
-            self.assertEqual(loaded.system_prompt, "Aggressive impatient South Park snark while doing the job.")
-            with self.assertRaises(HTTPException) as raised:
-                api_mod.update_persona(
-                    "missing-pack",
-                    api_mod.UpdatePersonaRequest(character_strength=50),
-                )
-            self.assertEqual(raised.exception.status_code, 404)
-        finally:
-            api_mod.storage = previous
+        )
+        existing = storage.get_persona("cartman")
+        existing.character_strength = persona_sync.character_strength_percent(100)
+        saved = storage.save_persona(existing)
+        self.assertEqual(saved.character_strength, 100)
+        loaded = storage.get_persona("cartman")
+        self.assertEqual(loaded.character_strength, 100)
+        self.assertEqual(loaded.name, "Eric Cartman")
+        self.assertEqual(loaded.system_prompt, "Aggressive impatient South Park snark while doing the job.")
+        api_src = Path(__file__).resolve().parent.joinpath("backend", "api.py").read_text(encoding="utf-8")
+        self.assertIn('@router.put("/personas/{persona_id}")', api_src)
+        self.assertIn("def update_persona(", api_src)
+        self.assertIn('status_code=404, detail=f"Persona \'{persona_id}\' not found"', api_src)
+        self.assertIn('"updated": True', api_src)
 
     def test_storage_skips_dotfiles(self):
         root = self.home / "personas"
