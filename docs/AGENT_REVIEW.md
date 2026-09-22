@@ -48,7 +48,7 @@ A **speaking persona** is three things bound together:
 
 **Character strength (Charles, 2026-09-22):** Studio Temperature / Expressiveness is **TTS-only**. A separate **Character strength** control (Soft / Medium / Strong) scales overlay wording so the LLM leans harder on persona mannerisms without replacing the profile job/soul. Titlebar apply sends the pack’s stored strength.
 
-**Titlebar packs only (Charles, 2026-09-22):** hide voice-only clones that are not backed by a persona pack. After Promax cleanup, complete packs are amanda, cartman, flirty, jarvis, sexy_girl, vincent_price, voldemort. Incomplete stubs (hermes_default, hermes_porky_pig, kitt, storyteller) were deleted — do not auto-reseed them. Titlebar lists **complete packs** (non-stub prompt + usable cloned `voice_id`, or a Fish twin of that pack) plus Standard Hermes + Open Studio. Voice-only orphans stay in Studio for cloning/editing.
+**Titlebar packs only (Charles, 2026-09-22):** hide voice-only clones that are not backed by a persona pack. After Promax cleanup, complete packs are amanda, cartman, flirty, jarvis, sexy_girl, vincent_price, voldemort. Incomplete stubs (hermes_default, hermes_porky_pig, kitt, storyteller) were deleted — do not auto-reseed them. Titlebar lists **complete packs** (non-stub prompt + usable cloned `voice_id`, or a Fish twin of that pack) plus Standard Hermes + Open Studio. Voice-only orphans stay in Studio for cloning/editing. **`install.py --sync-voices` must not recreate those deleted stubs** from name-only Fish clones (`Hermes kitt`); sync/ensure only create a pack when `fallback_system_prompt` is non-stub, but still rebind `voice_id` on existing cartman/jarvis.
 
 **Sticky leftover `agent.system_prompt` (earlier Promax mechanic retest):** empty `display.personality` + Edge Aria still answered as KITT because leftover `agent.system_prompt: You are K.I.T.T....` is used when no personality is named. Reset still stashes/restores that user-owned field (or `''` if the leftover matched a Studio catalog overlay). Studio must not put Cartman/KITT identity back into it on apply. Memories/`USER.md` “Active profile: kitt” can still bias the model (out of band).
 
@@ -91,7 +91,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | `backend/session_overlay.py` | **New.** Stash/restore personality + user `agent.system_prompt` + TTS. Apply writes a **style overlay** catalog entry + `display.personality` + Fish-prefer TTS. Accepts **character_strength**. Does **not** clobber user `agent.system_prompt` with “You are Cartman”. Unusable stash → Edge AriaNeural. No-stash leftover reset **always** clears `display.personality` (untagged `cartman` included); `agent.system_prompt` only when Studio-injected. |
 | `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; catalog `system_prompt` is the style overlay (`source: hermes-personastudio`). |
 | `backend/api.py` | Clone returns `{voice, persona}`. `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
-| `backend/persona_sync.py` | `build_style_overlay_prompt` takes **character strength** (soft/medium/strong). `is_listable_persona_pack` / stub + placeholder-voice helpers. Fallback/sync templates are mannerisms. Scored Fish name-match. Fish-prefer resolve. |
+| `backend/persona_sync.py` | `build_style_overlay_prompt` takes **character strength** (soft/medium/strong). `is_listable_persona_pack` / stub + placeholder-voice helpers. `ensure`/`sync` skip creating stub packs from name-only Fish clones. Fallback/sync templates are mannerisms. Scored Fish name-match. Fish-prefer resolve. |
 | `backend/config_io.py` | **New.** Prefer Hermes `atomic_roundtrip_yaml_update`; else PyYAML mutate-only + atomic replace. |
 | `backend/managed_index.py` | **New.** `~/.hermes/personas/.studio-managed.json` snapshots prior values for purge. |
 | `backend/paths.py` | **New.** Hermes home / config path helpers including `.studio-session.json`. |
@@ -129,7 +129,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | Companion refresh | Same startup reset. Never auto-applies a Studio persona | — |
 | Studio Save Persona | Bundle under `personas/` including **character_strength** (LLM). Temperature stays TTS-only. | Not auto-applied until titlebar |
 | Studio Clone | Provider clone **and** matching persona bundle | Not auto-applied |
-| `POST /sync-from-voices` or `install.py --sync-voices` | Missing bundles created; name-matched seeded personas rebound | No session change |
+| `POST /sync-from-voices` or `install.py --sync-voices` | Existing packs rebound; **no new pack** if the only prompt would be a stub fallback (name-only `Hermes kitt`). Rich Voicebox description may still create. | No session change |
 | Studio “Apply Voice to Bot” | TTS keys only (surgical, group-chat). Does **not** write session overlay | Existing session may still use old voice until new chat |
 | Install | Plugin copy + optional systemd + seed + sync | N/A |
 | Uninstall (default) | Plugin removed; companion stopped; personas + config kept | N/A |

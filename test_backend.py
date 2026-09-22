@@ -198,14 +198,12 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         ]
         result = persona_sync.sync_personas_from_voices(storage, voices)
         self.assertTrue(result["ok"])
-        self.assertEqual(sorted(result["created"]), ["cartman", "jarvis"])
+        self.assertEqual(result["created"], ["jarvis"])
+        self.assertIn("voice-cartman-1", result["skipped"])
         jarvis = storage.get_persona("jarvis")
         self.assertEqual(jarvis.voice_id, "voice-jarvis-1")
         self.assertIn("butler", jarvis.system_prompt.lower())
-        cartman = storage.get_persona("cartman")
-        self.assertEqual(cartman.voice_id, "voice-cartman-1")
-        self.assertNotIn("You are Cartman", cartman.system_prompt)
-        self.assertIn("Cartman", cartman.system_prompt)
+        self.assertIsNone(storage.get_persona("cartman"))
 
     def test_sync_from_voices_is_idempotent(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
@@ -215,7 +213,7 @@ class TestPersonaSync(IsolatedHermesHomeTest):
                 name="Jarvis",
                 provider="voicebox",
                 voice_type="cloned",
-                description="You are Jarvis.",
+                description="You are Jarvis, a highly capable British butler.",
             )
         ]
         first = persona_sync.sync_personas_from_voices(storage, voices)
@@ -252,6 +250,64 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         self.assertEqual(loaded.provider, "voicebox")
         self.assertEqual(loaded.system_prompt, "You are Jarvis, keep this custom prompt.")
 
+    def test_sync_does_not_recreate_stub_fish_name_clones(self):
+        """Name-only Fish clones must not recreate deleted hermes_* stub packs."""
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        storage.save_persona(
+            PersonaBundle(
+                id="cartman",
+                name="Eric Cartman",
+                avatar="🧢",
+                system_prompt="Aggressive impatient South Park snark while doing the job.",
+                provider="voicebox",
+                voice_id="old-cartman",
+                voice_name="Cartman",
+            )
+        )
+        storage.save_persona(
+            PersonaBundle(
+                id="jarvis",
+                name="Jarvis (Tech Butler)",
+                avatar="🤖",
+                system_prompt="Precise calm British butler manner while doing the profile job.",
+                provider="fish_audio",
+                voice_id="default",
+                voice_name="Fish Audio (Default)",
+            )
+        )
+        voices = [
+            VoiceInfo(id="fish-kitt", name="Hermes kitt", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-porky", name="Hermes porky pig", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-default", name="Hermes default", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-cartman", name="Hermes eric_cartman", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-jarvis", name="Hermes jarvis", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(
+                id="vb-voldemort",
+                name="Voldemort",
+                provider="voicebox",
+                voice_type="cloned",
+                description="Cold, precise, aristocratic hiss. Complete the profile job without claiming you are only Voldemort.",
+            ),
+        ]
+        result = persona_sync.sync_personas_from_voices(storage, voices)
+        ids = {p.id for p in storage.list_personas()}
+        self.assertNotIn("hermes_kitt", ids)
+        self.assertNotIn("kitt", ids)
+        self.assertNotIn("hermes_porky_pig", ids)
+        self.assertNotIn("porky_pig", ids)
+        self.assertNotIn("hermes_default", ids)
+        self.assertIn("fish-kitt", result["skipped"])
+        self.assertIn("fish-porky", result["skipped"])
+        self.assertIn("fish-default", result["skipped"])
+        self.assertEqual(storage.get_persona("cartman").voice_id, "fish-cartman")
+        self.assertEqual(storage.get_persona("jarvis").voice_id, "fish-jarvis")
+        self.assertIn("voldemort", result["created"])
+        self.assertIn("aristocratic", storage.get_persona("voldemort").system_prompt.lower())
+        self.assertIsNone(persona_sync.ensure_persona_for_voice(
+            storage,
+            VoiceInfo(id="fish-kitt", name="Hermes kitt", provider="fish_audio", voice_type="cloned"),
+        ))
+
     def test_sync_skips_preset_and_default_voices(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
         voices = [
@@ -264,16 +320,37 @@ class TestPersonaSync(IsolatedHermesHomeTest):
 
     def test_ensure_persona_for_voice_updates_same_slug(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
-        voice = VoiceInfo(id="abc", name="Storyteller", provider="voicebox", voice_type="cloned")
-        first = persona_sync.ensure_persona_for_voice(storage, voice)
+        storage.save_persona(
+            PersonaBundle(
+                id="storyteller",
+                name="The Storyteller",
+                avatar="🎙️",
+                system_prompt="Vivid theatrical narrator cadence while doing the profile job.",
+                provider="voicebox",
+                voice_id="abc",
+                voice_name="Storyteller",
+            )
+        )
         voice2 = VoiceInfo(id="def", name="The Storyteller", provider="voicebox", voice_type="cloned")
         second = persona_sync.ensure_persona_for_voice(storage, voice2)
-        self.assertEqual(first.id, second.id)
+        self.assertIsNotNone(second)
+        self.assertEqual(second.id, "storyteller")
         self.assertEqual(second.voice_id, "def")
         self.assertEqual(len(storage.list_personas()), 1)
 
     def test_sync_does_not_downgrade_fish_binding_to_voicebox(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        storage.save_persona(
+            PersonaBundle(
+                id="cartman",
+                name="Eric Cartman",
+                avatar="🧢",
+                system_prompt="Aggressive impatient South Park snark while doing the job.",
+                provider="fish_audio",
+                voice_id="fish-cartman",
+                voice_name="Cartman",
+            )
+        )
         voices = [
             VoiceInfo(id="fish-cartman", name="Cartman", provider="fish_audio", voice_type="cloned"),
             VoiceInfo(id="vb-cartman", name="Cartman", provider="voicebox", voice_type="cloned"),
@@ -285,9 +362,16 @@ class TestPersonaSync(IsolatedHermesHomeTest):
 
     def test_sync_upgrades_voicebox_bundle_when_fish_twin_appears(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
-        persona_sync.ensure_persona_for_voice(
-            storage,
-            VoiceInfo(id="vb-kitt", name="KITT", provider="voicebox", voice_type="cloned"),
+        storage.save_persona(
+            PersonaBundle(
+                id="kitt",
+                name="KITT",
+                avatar="🚗",
+                system_prompt="Clipped loyal Knight Rider cadence while doing the profile job.",
+                provider="voicebox",
+                voice_id="vb-kitt",
+                voice_name="KITT",
+            )
         )
         persona_sync.ensure_persona_for_voice(
             storage,

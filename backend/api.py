@@ -217,7 +217,11 @@ async def clone_voice(
             reference_text=reference_text,
         )
         persona = persona_sync.ensure_persona_for_voice(storage, vinfo)
-        return {"ok": True, "voice": vinfo.to_dict(), "persona": persona.to_dict()}
+        return {
+            "ok": True,
+            "voice": vinfo.to_dict(),
+            "persona": persona.to_dict() if persona else None,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

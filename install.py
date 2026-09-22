@@ -132,6 +132,7 @@ def sync_voices_from_install() -> None:
     from backend.persona_sync import collect_provider_voices, sync_personas_from_voices
 
     voices = collect_provider_voices(PROVIDERS)
+    # Same stub rule as ensure/sync: name-only Fish clones do not recreate packs.
     result = sync_personas_from_voices(storage, voices)
     print(
         f"  ✓ Sync-from-voices: created={len(result['created'])} "

@@ -343,6 +343,11 @@ def fallback_system_prompt(name: str, description: Optional[str] = None) -> str:
     )
 
 
+def fallback_prompt_is_stub(name: str, description: Optional[str] = None) -> bool:
+    """True when a voice has no rich description — name-only Fish clones, etc."""
+    return is_stub_persona_prompt(fallback_system_prompt(name, description), name)
+
+
 def _voice_as_info(voice: Any) -> VoiceInfo:
     if isinstance(voice, VoiceInfo):
         return voice
@@ -381,14 +386,21 @@ def ensure_persona_for_voice(
     voice: Any,
     *,
     overwrite_prompt: bool = False,
-) -> PersonaBundle:
-    """Create or update a persona bundle bound to *voice*. Idempotent."""
+) -> Optional[PersonaBundle]:
+    """Bind *voice* onto an existing pack, or create one when the prompt is not a stub.
+
+    Promax: ``install.py --sync-voices`` recreated deleted ``hermes_kitt`` /
+    ``hermes_porky_pig`` / ``hermes_default`` from name-only Fish clones
+    (fallback “distinctive tone…”). Do not create those. Existing cartman /
+    jarvis packs still get their ``voice_id`` rebound.
+    """
     info = _voice_as_info(voice)
     if not info.id:
         raise ValueError("voice is missing an id")
 
     existing = find_persona_for_voice(storage, info)
     prompt = fallback_system_prompt(info.name, info.description)
+    stub_prompt = is_stub_persona_prompt(prompt, info.name)
 
     if existing:
         incoming_rank = provider_rank(info.provider)
@@ -400,9 +412,12 @@ def ensure_persona_for_voice(
             existing.provider = info.provider or existing.provider
             existing.voice_id = info.id
             existing.voice_name = info.name or existing.voice_name
-        if overwrite_prompt or not (existing.system_prompt or "").strip():
+        if (overwrite_prompt or not (existing.system_prompt or "").strip()) and not stub_prompt:
             existing.system_prompt = prompt
         return storage.save_persona(existing)
+
+    if stub_prompt:
+        return None
 
     bundle = PersonaBundle(
         id=slugify_persona_id(info.name),
@@ -444,6 +459,9 @@ def sync_personas_from_voices(
             continue
         before = find_persona_for_voice(storage, info)
         bundle = ensure_persona_for_voice(storage, info)
+        if bundle is None:
+            skipped.append(info.id or info.name)
+            continue
         if before is None and bundle.id not in existing_before:
             created.append(bundle.id)
         else:
