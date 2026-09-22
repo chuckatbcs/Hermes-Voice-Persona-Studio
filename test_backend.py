@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -684,6 +685,42 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         self.assertEqual(data["tts"]["providers"]["voicebox"]["voice"], "c9da87b0-19be-49c4-ab44-01cb7943f5c4")
         self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "old_voice")
         self.assertEqual(data["agent"]["max_turns"], 12)
+
+    def test_assign_fish_voice_pins_fish_voice_id_over_stale_label(self):
+        stale = "7121ed18a81b450d8e54e5638190eb26"
+        live = "a3767161e96c4b7caa61b605bc6b015a"
+        cfg = self.home / "config.yaml"
+        cfg.write_text(
+            "model: keep-me\n"
+            "tts:\n"
+            "  provider: fish\n"
+            "  providers:\n"
+            "    fish:\n"
+            "      voice: vincent_price\n"
+            "      command: voicebox_tts --fish-label vincent_price\n"
+            "      clones:\n"
+            f"        vincent_price: {stale}\n"
+            "display:\n"
+            "  personality: helpful\n",
+            encoding="utf-8",
+        )
+        result = bot_profiles.assign_voice_to_profile(
+            "default",
+            "fish_audio",
+            live,
+            "Vincent Price",
+            cfg_path=cfg,
+        )
+        self.assertTrue(result["ok"])
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        command = data["tts"]["providers"]["fish"]["command"]
+        self.assertIn("--fish-voice " + live, command)
+        self.assertIn("--fish-label vincent_price", command)
+        self.assertNotIn(stale, command)
+        self.assertEqual(data["tts"]["providers"]["fish"]["clones"]["vincent_price"], live)
+        self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "vincent_price")
+        cache = json.loads((self.home / "fish_voices.json").read_text(encoding="utf-8"))
+        self.assertEqual(cache["vincent_price"], live)
 
     def test_update_config_keys_preserves_sibling_keys(self):
         cfg = self._write_config()

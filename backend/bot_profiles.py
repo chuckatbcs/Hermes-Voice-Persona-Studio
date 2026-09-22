@@ -6,6 +6,7 @@ otherwise PyYAML mutate-only + atomic replace). Studio never patches
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -110,6 +111,59 @@ def _clean_key(name: str) -> str:
     return slugify_persona_id(name)
 
 
+_DEFAULT_FISH_COMMAND = "voicebox_tts"
+
+
+def fish_voices_cache_path() -> Path:
+    return hermes_home() / "fish_voices.json"
+
+
+def _upsert_cli_flag(command: str, flag: str, value: str) -> str:
+    pattern = rf"{re.escape(flag)}\s+\S+"
+    replacement = f"{flag} {value}"
+    if re.search(pattern, command):
+        return re.sub(pattern, replacement, command, count=1)
+    return f"{command.rstrip()} {replacement}".strip()
+
+
+def _pin_fish_command(cmd: Any, voice_id: str, label: str) -> str:
+    """Explicit --fish-voice wins over label cache / stale clones.<label>."""
+    text = cmd if isinstance(cmd, str) and cmd.strip() else _DEFAULT_FISH_COMMAND
+    text = _upsert_cli_flag(text, "--fish-label", label)
+    return _upsert_cli_flag(text, "--fish-voice", voice_id)
+
+
+def save_cached_voice(label: str, voice_id: str, voice_name: str = "") -> Path:
+    """Sync ~/.hermes/fish_voices.json so --fish-label resolves the bound id."""
+    try:
+        from fish_tts import save_cached_voice as _imported  # type: ignore
+
+        _imported(label, voice_id)
+    except Exception:
+        pass
+    path = fish_voices_cache_path()
+    data: Any = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data[label] = voice_id
+    voices = data.get("voices")
+    if isinstance(voices, dict):
+        prev = voices.get(label)
+        if isinstance(prev, dict):
+            voices[label] = {**prev, "id": voice_id, "voice_id": voice_id, "name": voice_name or label}
+        else:
+            voices[label] = voice_id
+        data["voices"] = voices
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def _tts_updates_for_voice(cfg: Dict[str, Any], provider: str, voice_id: str, voice_name: str) -> Dict[str, Any]:
     target_prov = "fish" if provider in ("fish", "fish_audio") else "voicebox"
     clean_name = _clean_key(voice_name)
@@ -125,15 +179,14 @@ def _tts_updates_for_voice(cfg: Dict[str, Any], provider: str, voice_id: str, vo
                 "timeout": 600,
                 "clones": {clean_name: voice_id},
                 "voice": clean_name,
+                "command": _pin_fish_command("", voice_id, clean_name),
             }
         else:
             updates[f"tts.providers.fish.clones.{clean_name}"] = voice_id
             updates["tts.providers.fish.voice"] = clean_name
-            cmd = fish_cfg.get("command", "")
-            if isinstance(cmd, str) and "--fish-label" in cmd:
-                updates["tts.providers.fish.command"] = re.sub(
-                    r"--fish-label\s+\S+", f"--fish-label {clean_name}", cmd
-                )
+            updates["tts.providers.fish.command"] = _pin_fish_command(
+                fish_cfg.get("command", ""), voice_id, clean_name
+            )
     else:
         if not is_usable_voicebox_voice_id(voice_id):
             raise ValueError(
@@ -174,12 +227,16 @@ def assign_voice_to_profile(
 
     target_prov = "fish" if provider in ("fish", "fish_audio") else "voicebox"
     clean_name = _clean_key(voice_name)
+    cache_path = None
+    if target_prov == "fish" and not is_placeholder_voice_id(voice_id):
+        cache_path = save_cached_voice(clean_name, voice_id, voice_name)
     return {
         "ok": True,
         "profile_id": profile_id,
         "provider": target_prov,
         "voice": clean_name if target_prov == "fish" else voice_id,
         "write_strategy": strategy,
+        "fish_cache": str(cache_path) if cache_path else None,
     }
 
 
