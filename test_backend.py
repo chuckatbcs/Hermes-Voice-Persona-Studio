@@ -107,6 +107,69 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         already = persona_sync.build_style_overlay_prompt("Eric Cartman", overlay)
         self.assertEqual(already, overlay)
 
+    def test_character_strength_bands_change_overlay_emphasis(self):
+        source = "Aggressive, impatient South Park snark. Still do the profile job."
+        soft = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength="soft")
+        medium = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength="medium")
+        strong = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength="strong")
+        from_percent = persona_sync.build_style_overlay_prompt("Eric Cartman", source, strength=90)
+        self.assertNotEqual(soft, medium)
+        self.assertNotEqual(medium, strong)
+        self.assertNotEqual(soft, strong)
+        self.assertEqual(strong, from_percent)
+        self.assertEqual(persona_sync.normalize_character_strength(25), "soft")
+        self.assertEqual(persona_sync.normalize_character_strength(50), "medium")
+        self.assertEqual(persona_sync.normalize_character_strength(85), "strong")
+        self.assertIn("(soft)", soft)
+        self.assertIn("Additionally, reply in the speaking style", soft)
+        self.assertIn("Prefer this character's speaking voice", medium)
+        self.assertIn("Character priority is high", strong)
+        for overlay in (soft, medium, strong):
+            self.assertIn("SOUL.md", overlay)
+            self.assertIn("AGENTS.md", overlay)
+            self.assertIn("snark", overlay.lower())
+            self.assertNotRegex(overlay, r"(?i)^you are eric cartman")
+            self.assertNotIn("TTS temperature", overlay.lower())
+        rebuilt = persona_sync.build_style_overlay_prompt("Eric Cartman", soft, strength="strong")
+        self.assertIn("Character priority is high", rebuilt)
+        self.assertIn("snark", rebuilt.lower())
+
+    def test_listable_pack_requires_prompt_and_cloned_voice(self):
+        complete = PersonaBundle(
+            id="cartman",
+            name="Eric Cartman",
+            avatar="🧢",
+            system_prompt="Aggressive impatient South Park snark while doing the job.",
+            provider="voicebox",
+            voice_id="c9da87b0-19be-49c4-ab44-01cb7943f5c4",
+            voice_name="Cartman",
+        )
+        stub = PersonaBundle(
+            id="storyteller",
+            name="The Storyteller",
+            avatar="🎙️",
+            system_prompt="distinctive tone, vocabulary, and cadence associated with The Storyteller; stay helpful and complete the profile's job",
+            provider="fish_audio",
+            voice_id="default",
+            voice_name="Fish Audio (Default)",
+        )
+        no_voice = PersonaBundle(
+            id="kitt",
+            name="KITT",
+            avatar="🚗",
+            system_prompt="Clipped loyal Knight Rider cadence while doing the profile job.",
+            provider="fish_audio",
+            voice_id="default",
+            voice_name="Fish Audio (Default)",
+        )
+        self.assertTrue(persona_sync.is_listable_persona_pack(complete))
+        self.assertFalse(persona_sync.is_listable_persona_pack(stub))
+        self.assertFalse(persona_sync.is_listable_persona_pack(no_voice))
+        voices = [
+            VoiceInfo(id="fish-kitt", name="Hermes kitt", provider="fish_audio", voice_type="cloned"),
+        ]
+        self.assertTrue(persona_sync.is_listable_persona_pack(no_voice, voices))
+
     def test_mannerism_from_prompt_strips_you_are_identity(self):
         style = persona_sync.mannerism_from_prompt(
             "You are K.I.T.T. from Knight Rider. Be clipped and loyal.",
@@ -897,6 +960,28 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
             any(p.get("profile_id") == "critic" and p.get("leftover_personality_cleared") for p in report["profiles"])
         )
 
+    def test_apply_strong_character_strength_writes_emphatic_overlay(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        apply = session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman. Speak with aggressive snark.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            character_strength="strong",
+            cfg_path=cfg,
+        )
+        self.assertEqual(apply["character_strength"], "strong")
+        self.assertIn("Character priority is high", apply["style_overlay"])
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        overlay = after["agent"]["personalities"]["eric_cartman"]["system_prompt"]
+        self.assertIn("Character priority is high", overlay)
+        self.assertEqual(after["agent"]["personalities"]["eric_cartman"]["character_strength"], "strong")
+        self.assertNotEqual((after.get("agent") or {}).get("system_prompt") or "", overlay)
+
     def test_apply_does_not_write_bare_you_are_cartman_identity(self):
         from backend import session_overlay
 
@@ -1088,6 +1173,11 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("focusedSessionProfile", self.src)
         self.assertIn("persona-select-${profileId}", self.src)
         self.assertIn("syncTitlebarToFocusedProfile", self.src)
+        self.assertIn("character_strength", select)
+        self.assertNotIn("🎙️ CLONES", self.src)
+        self.assertIn("complete packs", self.src)
+        self.assertIn("Character strength (LLM style — not TTS)", self.src)
+        self.assertIn("Temperature / Expressiveness (TTS only)", self.src)
 
     def test_profile_switch_to_other_bot_is_not_user_new_chat(self):
         data = self._run_js(
@@ -1117,6 +1207,52 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertFalse(data["own"]["resetNewProfile"])
         self.assertEqual(data["own"]["selection"], "jarvis")
         self.assertEqual(data["sel"], "persona:eric_cartman")
+
+    def test_titlebar_lists_only_complete_packs(self):
+        helpers = self.src[self.src.index("function isGenericVoiceDescription") :]
+        helpers = helpers[: helpers.index("// TITLEBAR_PACK_END") + len("// TITLEBAR_PACK_END")]
+        data = self._run_js_helpers(
+            helpers,
+            """
+            const complete = {
+              id: 'cartman',
+              name: 'Eric Cartman',
+              system_prompt: 'Aggressive impatient South Park snark while doing the job.',
+              voice_id: 'c9da87b0-19be-49c4-ab44-01cb7943f5c4'
+            };
+            const stub = {
+              id: 'storyteller',
+              name: 'The Storyteller',
+              system_prompt: 'distinctive tone, vocabulary, and cadence associated with The Storyteller; stay helpful',
+              voice_id: 'default'
+            };
+            const orphanVoice = { id: 'porky-id', name: 'Porky Pig', provider: 'fish_audio', voice_type: 'cloned' };
+            console.log(JSON.stringify({
+              complete: isListablePersonaPack(complete, [orphanVoice]),
+              stub: isListablePersonaPack(stub, [orphanVoice]),
+              strength: normalizeCharacterStrength(80)
+            }));
+            """,
+        )
+        self.assertTrue(data["complete"])
+        self.assertFalse(data["stub"])
+        self.assertEqual(data["strength"], "strong")
+
+    def _run_js_helpers(self, helpers: str, body: str):
+        import json
+        import subprocess
+        import tempfile
+
+        script = helpers + "\n" + body + "\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            path = handle.name
+        try:
+            result = subprocess.run(["node", path], capture_output=True, text=True, check=False)
+        finally:
+            Path(path).unlink(missing_ok=True)
+        self.assertEqual(result.returncode, 0, msg=f"node failed: {result.stderr or result.stdout}")
+        return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):
@@ -1151,16 +1287,24 @@ class TestSeedPresets(IsolatedHermesHomeTest):
 
         seed_presets.STORAGE_ROOT = self.home / "personas"
         seed_presets.seed()
-        self.assertTrue((self.home / "personas" / "jarvis" / "prompt.md").exists())
-        prompt = (self.home / "personas" / "jarvis" / "prompt.md").read_text(encoding="utf-8")
+        self.assertFalse((self.home / "personas" / "storyteller" / "prompt.md").exists())
+        self.assertFalse((self.home / "personas" / "jarvis" / "prompt.md").exists())
+        cartman_path = self.home / "personas" / "cartman" / "prompt.md"
+        self.assertTrue(cartman_path.exists())
+        cartman = cartman_path.read_text(encoding="utf-8")
         seed_presets.seed()
-        prompt_again = (self.home / "personas" / "jarvis" / "prompt.md").read_text(encoding="utf-8")
-        self.assertEqual(prompt, prompt_again)
-        self.assertNotRegex(prompt, r"(?i)^you are\b")
-        cartman = (self.home / "personas" / "cartman" / "prompt.md").read_text(encoding="utf-8")
+        self.assertEqual(cartman, cartman_path.read_text(encoding="utf-8"))
         self.assertNotRegex(cartman, r"(?i)^you are eric cartman")
         self.assertIn("PC repair", cartman)
         self.assertIn("role", cartman.lower())
+        jarvis_dir = self.home / "personas" / "jarvis"
+        jarvis_dir.mkdir(parents=True)
+        (jarvis_dir / "prompt.md").write_text("Existing Jarvis mannerisms.\n", encoding="utf-8")
+        seed_presets.seed()
+        self.assertEqual(
+            (jarvis_dir / "prompt.md").read_text(encoding="utf-8"),
+            "Existing Jarvis mannerisms.\n",
+        )
 
 
 if __name__ == "__main__":

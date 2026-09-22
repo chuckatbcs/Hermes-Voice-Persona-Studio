@@ -222,7 +222,7 @@ def install(sync_voices: bool = True, systemd: bool = False) -> int:
     print("  Installation Complete! 🎉")
     print("  1. Launch or reload Hermes Desktop.")
     print("  2. Click '🎭 Personas' or '🎙️ Studio' in the titlebar.")
-    print("  3. Picking a persona OR a clone applies LLM system text + bound TTS voice.")
+    print("  3. Picking a complete persona pack applies speaking style + cloned TTS (not voice-only clones).")
     print("=" * 60)
     return 0
 

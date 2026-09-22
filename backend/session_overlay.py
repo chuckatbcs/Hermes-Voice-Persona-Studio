@@ -33,6 +33,7 @@ from .persona_sync import (
     STYLE_OVERLAY_MARKER,
     build_style_overlay_prompt,
     is_style_overlay_prompt,
+    normalize_character_strength,
 )
 
 STASH_KEYS = (
@@ -235,6 +236,7 @@ def apply_session_overlay(
     provider: Optional[str] = None,
     voice_id: Optional[str] = None,
     voice_name: Optional[str] = None,
+    character_strength: Optional[str] = None,
     cfg_path: Optional[Path] = None,
     state_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -258,12 +260,16 @@ def apply_session_overlay(
             "stash": stash,
         }
 
-    style_overlay = build_style_overlay_prompt(persona_name, persona_prompt)
+    strength = normalize_character_strength(character_strength)
+    style_overlay = build_style_overlay_prompt(
+        persona_name, persona_prompt, strength=strength
+    )
     persona_result = bot_profiles.set_profile_persona(
         profile_id,
         persona_name,
         style_overlay,
         cfg_path=path,
+        character_strength=strength,
     )
     cfg_live = load_yaml(path)
     live_prompt = str(get_dotted(cfg_live, "agent.system_prompt") or "")
@@ -294,6 +300,7 @@ def apply_session_overlay(
         "voice": (voice_result or {}).get("voice"),
         "write_strategy": persona_result.get("write_strategy"),
         "style_overlay": style_overlay,
+        "character_strength": strength,
         "touched_system_prompt": False,
         "message": (
             f"Speaking style '{persona_name}' applied to this session on '{profile_id}'. "

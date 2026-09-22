@@ -75,7 +75,7 @@ python3 install.py
 The installer will:
 1. Validate Python dependencies (`fastapi`, `uvicorn`, `requests`, `pyyaml`).
 2. Verify local Voicebox models (or default to Fish Audio cloud if GPU is absent).
-3. Seed factory starter personas (`Jarvis`, `Storyteller`, `Cartman`) without clobbering existing `prompt.md` files.
+3. Seed factory starter personas that already have a cloned `voice_id` (Cartman). Incomplete Fish-`default` presets (Jarvis / Storyteller) are **not** auto-created so deleted stub packs stay gone. Existing `prompt.md` files are never clobbered.
 4. Reconcile existing Voicebox/Fish clones into persona bundles (`--no-sync-voices` to skip).
 5. Deploy `plugin.js` to `~/.hermes/desktop-plugins/hermes-personastudio/` (never a misnamed `plugin.py`).
 6. Launch the background companion service on `http://127.0.0.1:17495`.
@@ -89,13 +89,13 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 ### 1. Launching the Studio
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **persona** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. The next reply picks up the ephemeral overlay. The selected Hermes profile’s SOUL / job / skills stay primary (Mechanic + Cartman = mechanic that *speaks like* Cartman). Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay — another bot’s Cartman name is not an apply. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only. Local **Voicebox / Qwen** remains an explicit `Name · Voicebox` choice.
+3. Picking a **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. The next reply picks up the ephemeral overlay. The selected Hermes profile’s SOUL / job / skills stay primary (Mechanic + Cartman = mechanic that *speaks like* Cartman). **Character strength** (Soft / Medium / Strong) on the pack scales how hard the LLM leans on that style — this is **not** TTS Temperature / Expressiveness. The titlebar lists only packs with a non-stub prompt and a usable cloned voice; voice-only clones stay in Studio. Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay — another bot’s Cartman name is not an apply. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
 2. Choose a voice from the dropdown. For near-zero latency on local GPUs, select **`Qwen 3 (0.6B - ⚡ Instant ~0.4s Lag)`**.
 3. Type any text in the preview box and click **`▶ Audition`**.
-4. Adjust the **Speed** and **Temperature / Expressiveness** sliders to taste.
+4. Adjust **Speed** and **Temperature / Expressiveness (TTS only)** for audition. Use **Character strength (LLM style)** to choose Soft / Medium / Strong overlay emphasis — Temperature does **not** change how in-character the text replies are.
 
 ### 3. Assigning a Voice to a Bot for Group Chats
 1. In the Studio dialog, locate the **`🤖 Assign Voice to Hermes Bot / Profile`** section.
@@ -129,7 +129,7 @@ The companion service runs at `http://127.0.0.1:17495`.
 | `/api/studio/resolve-tts` | `POST` | Prefer a Fish clone twin unless `explicit` selected Voicebox |
 | `/api/studio/session/state` | `GET` | Session overlay stash status (`?profile_id=`) |
 | `/api/studio/session/reset-all` | `POST` | Restore leftover overlays on plugin startup (no auto-apply) |
-| `/api/studio/profiles/{id}/session/apply` | `POST` | Apply persona + voice for this chat; stash stock Hermes |
+| `/api/studio/profiles/{id}/session/apply` | `POST` | Apply persona + voice + character strength for this chat; stash stock Hermes |
 | `/api/studio/profiles/{id}/session/reset` | `POST` | Restore stashed stock Hermes personality + TTS |
 | `/api/studio/models?provider={p}` | `GET` | List synthesis engines (Qwen, Chatterbox, etc.) |
 | `/api/studio/audition` | `POST` | Generate real-time preview audio from text |
@@ -139,7 +139,7 @@ The companion service runs at `http://127.0.0.1:17495`.
 | `/api/studio/voices/{provider}/{id}/resample` | `POST` | Update reference audio for existing voice |
 | `/api/studio/profiles` | `GET` | List all Hermes bot profiles with active voices |
 | `/api/studio/profiles/{id}/assign-voice` | `POST` | 1-click assign a voice to a bot profile |
-| `/api/studio/personas` | `GET` / `POST` | Manage portable persona bundles |
+| `/api/studio/personas` | `GET` / `POST` | Manage portable persona bundles (`?listable=true` = complete packs only) |
 
 ---
 

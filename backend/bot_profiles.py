@@ -13,7 +13,11 @@ from typing import Any, Dict, List, Optional
 from .config_io import get_dotted, load_yaml, update_config_keys
 from .managed_index import SOURCE_TAG, remember_writes
 from .paths import config_path_for_profile, hermes_home, profiles_dir
-from .persona_sync import build_style_overlay_prompt, slugify_persona_id
+from .persona_sync import (
+    build_style_overlay_prompt,
+    normalize_character_strength,
+    slugify_persona_id,
+)
 
 _PLACEHOLDER_VOICE_IDS = frozenset({"", "default", "none", "null", "undefined"})
 _VOICEBOX_UUID = re.compile(
@@ -185,6 +189,7 @@ def set_profile_persona(
     persona_prompt: str,
     *,
     cfg_path: Optional[Path] = None,
+    character_strength: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Set the persona for a Hermes profile via display.personality.
 
@@ -216,9 +221,12 @@ def set_profile_persona(
         }
 
     personality_value = {
-        "system_prompt": build_style_overlay_prompt(persona_name, persona_prompt),
+        "system_prompt": build_style_overlay_prompt(
+            persona_name, persona_prompt, strength=character_strength
+        ),
         "source": SOURCE_TAG,
         "description": persona_name,
+        "character_strength": normalize_character_strength(character_strength),
     }
     updates = {
         f"agent.personalities.{clean_name}": personality_value,

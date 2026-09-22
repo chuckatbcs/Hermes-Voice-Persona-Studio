@@ -6,6 +6,12 @@ from pathlib import Path
 
 STORAGE_ROOT = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "personas"
 
+_PLACEHOLDER_VOICE = frozenset({"", "default", "none", "null", "undefined", "system"})
+
+
+def _usable_seed_voice(voice_id) -> bool:
+    return str(voice_id or "").strip().lower() not in _PLACEHOLDER_VOICE
+
 PRESETS = [
     {
         "id": "jarvis",
@@ -16,6 +22,7 @@ PRESETS = [
         "voice_name": "Fish Audio (Default)",
         "speed": 1.0,
         "temperature": 0.7,
+        "character_strength": "soft",
         "prompt": (
             "Precise, calm, formal British butler manner: dry understated wit, "
             "respectful address, structured concise answers with clear next actions. "
@@ -33,6 +40,7 @@ PRESETS = [
         "voice_name": "Cartman",
         "speed": 1.05,
         "temperature": 0.8,
+        "character_strength": "soft",
         "prompt": (
             "Aggressive, impatient, defiant South Park snark. Unfiltered comic outbursts, "
             "but still complete the profile's actual job (for example PC repair on mechanic). "
@@ -49,6 +57,7 @@ PRESETS = [
         "voice_name": "Fish Audio (Default)",
         "speed": 0.95,
         "temperature": 0.75,
+        "character_strength": "soft",
         "prompt": (
             "Vivid descriptive imagery, measured pacing, and theatrical gravitas. "
             "Bring atmosphere to explanations without abandoning the profile's job or "
@@ -63,7 +72,6 @@ def seed():
     for raw in PRESETS:
         p = deepcopy(raw)
         pdir = STORAGE_ROOT / p["id"]
-        pdir.mkdir(parents=True, exist_ok=True)
         prompt = p.pop("prompt")
         existing_prompt = pdir / "prompt.md"
         # Do not clobber a user-edited prompt; still refresh voice binding if
@@ -71,6 +79,12 @@ def seed():
         if existing_prompt.exists() and existing_prompt.read_text(encoding="utf-8").strip():
             print(f"Preset already present, keeping prompt: {p['name']} -> {pdir}")
             continue
+        # Do not auto-reinstall incomplete packs (Fish default / no clone).
+        # Promax deleted stub storyteller / hermes_default / kitt — do not recreate them.
+        if not _usable_seed_voice(p.get("voice_id")):
+            print(f"Skipping incomplete preset (no cloned voice): {p['name']}")
+            continue
+        pdir.mkdir(parents=True, exist_ok=True)
         with open(pdir / "prompt.md", "w", encoding="utf-8") as f:
             f.write(prompt)
         with open(pdir / "manifest.json", "w", encoding="utf-8") as f:

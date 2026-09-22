@@ -21,6 +21,7 @@ class PersonaBundle:
     voice_name: str
     speed: float = 1.0
     temperature: float = 0.7
+    character_strength: str = "soft"
     created_at: float = 0.0
     updated_at: float = 0.0
     tags: Optional[List[str]] = None
@@ -40,6 +41,7 @@ class PersonaBundle:
             voice_name=data.get("voice_name", data.get("voice_id", "Default")),
             speed=float(data.get("speed", 1.0)),
             temperature=float(data.get("temperature", 0.7)),
+            character_strength=str(data.get("character_strength") or "soft").strip().lower() or "soft",
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
             tags=data.get("tags") or [],

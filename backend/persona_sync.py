@@ -105,6 +105,16 @@ def is_generic_voice_description(description: Optional[str]) -> bool:
 
 STYLE_OVERLAY_MARKER = "SPEAKING STYLE OVERLAY"
 
+CHARACTER_STRENGTHS = ("soft", "medium", "strong")
+DEFAULT_CHARACTER_STRENGTH = "soft"
+CHARACTER_STRENGTH_PERCENT = {"soft": 25, "medium": 50, "strong": 85}
+
+_PLACEHOLDER_VOICE_IDS = frozenset({"", "default", "none", "null", "undefined", "system"})
+_STUB_PROMPT_EXACT = frozenset({"todo", "placeholder", "tbd", "stub"})
+_STUB_PROMPT_PREFIXES = (
+    "distinctive tone, vocabulary, and cadence associated with",
+)
+
 _IDENTITY_SENTENCE = re.compile(
     r"^\s*(?:you are|you['’]re|i am|i['’]m)\s+(?:an?\s+)?(.+)$",
     re.IGNORECASE,
@@ -160,27 +170,165 @@ def is_style_overlay_prompt(text: Optional[str]) -> bool:
     return STYLE_OVERLAY_MARKER.lower() in str(text or "").lower()
 
 
-def build_style_overlay_prompt(
-    persona_name: str,
-    style_source: Optional[str] = None,
-) -> str:
-    """Hermes ephemeral overlay: speaking style + voice mannerisms, not a new soul.
+def normalize_character_strength(value: Any = None) -> str:
+    """Map Soft / Medium / Strong or 0–100 onto overlay bands.
 
-    Profile SOUL.md / AGENTS.md / Hermes defaults stay primary identity.
-    Mechanic + Cartman ⇒ mechanic that *speaks like* Cartman.
+    Temperature / Expressiveness is TTS-only and must not be used here.
     """
+    if value is None or value == "":
+        return DEFAULT_CHARACTER_STRENGTH
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in CHARACTER_STRENGTHS:
+            return lowered
+        try:
+            value = float(lowered)
+        except ValueError:
+            return DEFAULT_CHARACTER_STRENGTH
+    if isinstance(value, bool):
+        return DEFAULT_CHARACTER_STRENGTH
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_CHARACTER_STRENGTH
+    if number <= 33:
+        return "soft"
+    if number <= 66:
+        return "medium"
+    return "strong"
+
+
+def character_strength_percent(value: Any = None) -> int:
+    return CHARACTER_STRENGTH_PERCENT[normalize_character_strength(value)]
+
+
+def overlay_strength_band(text: Optional[str]) -> str:
+    lowered = str(text or "").lower()
+    if "(strong)" in lowered:
+        return "strong"
+    if "(medium)" in lowered:
+        return "medium"
+    if "(soft)" in lowered:
+        return "soft"
+    if is_style_overlay_prompt(lowered):
+        return DEFAULT_CHARACTER_STRENGTH
+    return DEFAULT_CHARACTER_STRENGTH
+
+
+def _inner_style_from_overlay(text: str, persona_name: str) -> str:
     label = (persona_name or "this persona").strip() or "this persona"
-    raw = (style_source or "").strip()
-    if is_style_overlay_prompt(raw):
-        return raw
-    style = mannerism_from_prompt(raw, label)
+    escaped = re.escape(label)
+    match = re.search(
+        rf"(?:mannerisms|speaking voice|quirks|style, phrasing, attitude, and quirks|"
+        rf"phrasing, attitude, vocabulary, and quirks) of {escaped}:\s*(.+?)(?:\n|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(rf"of {escaped}:\s*(.+?)(?:\n|$)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return mannerism_from_prompt(text, label)
+
+
+def _wrap_style_overlay(label: str, style: str, strength: str) -> str:
+    if strength == "medium":
+        return (
+            f"{STYLE_OVERLAY_MARKER} (medium) — does not replace this profile's role.\n"
+            "Keep the identity, mission, skills, and constraints from this profile's "
+            "SOUL.md / AGENTS.md / Hermes defaults.\n"
+            f"Prefer this character's speaking voice: reply clearly in the style, phrasing, "
+            f"attitude, and quirks of {label}: {style}\n"
+            "The profile's job is still the mission — do not abandon it — but the "
+            "character's manner of speaking should be obvious in every reply."
+        )
+    if strength == "strong":
+        return (
+            f"{STYLE_OVERLAY_MARKER} (strong) — does not replace this profile's job.\n"
+            "The profile's SOUL.md / AGENTS.md / Hermes defaults remain the mission, "
+            "skills, and constraints.\n"
+            f"Character priority is high: lean hard on the phrasing, attitude, vocabulary, "
+            f"and quirks of {label} in every sentence: {style}\n"
+            "Stay in character as you do the profile's job. Do not drop the mannerisms. "
+            "Do not replace the job with only the character."
+        )
     return (
-        f"{STYLE_OVERLAY_MARKER} — does not replace this profile's role.\n"
+        f"{STYLE_OVERLAY_MARKER} (soft) — does not replace this profile's role.\n"
         "Keep the identity, mission, skills, and constraints from this profile's "
         "SOUL.md / AGENTS.md / Hermes defaults.\n"
         f"Additionally, reply in the speaking style and mannerisms of {label}: {style}\n"
         "Do not abandon the profile's job or claim you are only the character instead of that role."
     )
+
+
+def build_style_overlay_prompt(
+    persona_name: str,
+    style_source: Optional[str] = None,
+    strength: Any = None,
+) -> str:
+    """Hermes ephemeral overlay: speaking style + voice mannerisms, not a new soul.
+
+    Profile SOUL.md / AGENTS.md / Hermes defaults stay primary identity.
+    Mechanic + Cartman ⇒ mechanic that *speaks like* Cartman.
+    ``strength`` (soft / medium / strong) scales how hard the LLM leans on
+    character mannerisms. This is not TTS Temperature / Expressiveness.
+    """
+    label = (persona_name or "this persona").strip() or "this persona"
+    band = normalize_character_strength(strength)
+    raw = (style_source or "").strip()
+    if is_style_overlay_prompt(raw):
+        if overlay_strength_band(raw) == band:
+            return raw
+        style = _inner_style_from_overlay(raw, label)
+    else:
+        style = mannerism_from_prompt(raw, label)
+    return _wrap_style_overlay(label, style, band)
+
+
+def is_placeholder_voice_id(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in _PLACEHOLDER_VOICE_IDS
+
+
+def is_stub_persona_prompt(prompt: Optional[str], persona_name: str = "") -> bool:
+    """True for empty / generic fallback / leftover stub pack prompts."""
+    text = (prompt or "").strip()
+    if not text or len(text) < 24:
+        return True
+    lowered = text.lower()
+    if lowered in _STUB_PROMPT_EXACT:
+        return True
+    if any(lowered.startswith(prefix) for prefix in _STUB_PROMPT_PREFIXES):
+        return True
+    if is_generic_voice_description(text):
+        return True
+    _ = persona_name
+    return False
+
+
+def is_usable_pack_voice_id(voice_id: Any) -> bool:
+    """Cloned pack voice — not Fish ``default`` / system placeholders."""
+    return not is_placeholder_voice_id(voice_id)
+
+
+def is_listable_persona_pack(
+    bundle: Optional[PersonaBundle],
+    voices: Optional[Iterable[Any]] = None,
+) -> bool:
+    """Titlebar apply target: non-stub prompt + usable clone (or Fish twin)."""
+    if bundle is None:
+        return False
+    if is_stub_persona_prompt(bundle.system_prompt, bundle.name):
+        return False
+    if is_usable_pack_voice_id(bundle.voice_id):
+        return True
+    if not voices:
+        return False
+    names = [bundle.name, bundle.id, bundle.voice_name]
+    twins = find_name_matching_clones(names, voices, fish_only=False)
+    if twins:
+        return True
+    return bool(find_name_matching_clones(names, voices, fish_only=True))
 
 
 def fallback_system_prompt(name: str, description: Optional[str] = None) -> str:

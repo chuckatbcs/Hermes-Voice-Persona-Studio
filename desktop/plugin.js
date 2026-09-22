@@ -165,6 +165,61 @@ function lookupSelection(id, personas, voices) {
   return { persona: null, voice: null };
 }
 
+// TITLEBAR_PACK_BEGIN
+function normalizeCharacterStrength(value) {
+  if (value == null || value === '') return 'soft';
+  if (typeof value === 'string') {
+    const lowered = value.trim().toLowerCase();
+    if (lowered === 'soft' || lowered === 'medium' || lowered === 'strong') return lowered;
+    const parsed = Number(lowered);
+    if (!Number.isFinite(parsed)) return 'soft';
+    value = parsed;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 'soft';
+  if (number <= 33) return 'soft';
+  if (number <= 66) return 'medium';
+  return 'strong';
+}
+
+function characterStrengthPercent(value) {
+  const band = normalizeCharacterStrength(value);
+  return band === 'soft' ? 25 : band === 'medium' ? 50 : 85;
+}
+
+function characterStrengthLabel(value) {
+  const band = normalizeCharacterStrength(value);
+  return band === 'soft' ? 'Soft' : band === 'medium' ? 'Medium' : 'Strong';
+}
+
+function isPlaceholderVoiceId(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return !text || text === 'default' || text === 'none' || text === 'null' || text === 'undefined' || text === 'system';
+}
+
+function isStubPersonaPrompt(prompt) {
+  const text = String(prompt || '').trim();
+  if (!text || text.length < 24) return true;
+  const lowered = text.toLowerCase();
+  if (lowered === 'todo' || lowered === 'placeholder' || lowered === 'tbd' || lowered === 'stub') return true;
+  if (lowered.startsWith('distinctive tone, vocabulary, and cadence associated with')) return true;
+  return isGenericVoiceDescription(text);
+}
+
+function isListablePersonaPack(persona, voices) {
+  if (!persona) return false;
+  if (isStubPersonaPrompt(persona.system_prompt)) return false;
+  if (!isPlaceholderVoiceId(persona.voice_id)) return true;
+  const names = [persona.name, persona.id, persona.voice_name].filter(Boolean);
+  return (voices || []).some((voice) => {
+    if (!voice || isPlaceholderVoiceId(voice.id)) return false;
+    if (voice.voice_type && voice.voice_type !== 'cloned' && voice.voice_type !== 'custom') return false;
+    if (persona.voice_id && voice.id === persona.voice_id) return true;
+    return names.some((name) => nameMatchScore(name, voice.name) > 0 || nameMatchScore(name, voice.id) > 0);
+  });
+}
+// TITLEBAR_PACK_END
+
 function preferredProviderForPersona(persona, voices) {
   if (!persona) return 'voicebox';
   if (isFishProvider(persona.provider) && persona.voice_id && persona.voice_id !== 'default') {
@@ -615,30 +670,12 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     }
 
     if (!bundle && voiceMatch) {
-      try {
-        const createRes = await fetch(`${API_BASE}/personas`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: voiceMatch.name,
-            avatar: '🎙️',
-            system_prompt: fallbackSystemPrompt(voiceMatch.name, voiceMatch.description),
-            provider: voiceMatch.provider || 'voicebox',
-            voice_id: voiceMatch.id,
-            voice_name: voiceMatch.name,
-            tags: ['synced-from-voice', 'hermes-personastudio']
-          })
-        });
-        if (createRes.ok) {
-          const created = await createRes.json();
-          bundle = created.persona || created;
-          refreshPersonas?.();
-        } else {
-          console.warn('[PersonaStudio] Failed to create persona for voice', voiceMatch.name);
-        }
-      } catch (e) {
-        console.warn('[PersonaStudio] Persona ensure error:', e);
-      }
+      host.toast({
+        title: '🎙️ Voice-only clone',
+        message: 'This clone has no persona pack. Open Studio to finish style + voice before applying.'
+      });
+      setActiveId('default');
+      return;
     }
 
     if (!bundle) return;
@@ -685,7 +722,8 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
           persona_prompt: prompt,
           provider: boundProvider,
           voice_id: boundVoiceId && boundVoiceId !== 'default' ? boundVoiceId : null,
-          voice_name: boundVoiceName
+          voice_name: boundVoiceName,
+          character_strength: normalizeCharacterStrength(bundle.character_strength)
         })
       });
       applied = applyRes.ok;
@@ -716,15 +754,15 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       : null;
   };
 
-  const currentLookup = lookupSelection(activeId, personas, voices);
+  const listablePersonas = (personas || []).filter((p) => isListablePersonaPack(p, voices));
+  const currentLookup = lookupSelection(activeId, listablePersonas, []);
   const currentPersona = currentLookup.persona;
-  const currentVoice = currentLookup.voice;
-  const current = currentPersona || currentVoice;
+  const current = currentPersona;
   const currentProvider = currentPersona
     ? preferredProviderForPersona(currentPersona, voices)
-    : (currentVoice && currentVoice.provider);
+    : null;
   const triggerLabel = current
-    ? `${current.avatar || '🎙️'} ${current.name} · ${providerLabel(currentProvider)}`
+    ? `${current.avatar || '🎭'} ${current.name} · ${providerLabel(currentProvider)}`
     : '🎭 Personas';
 
   return jsxs('div', {
@@ -749,28 +787,15 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
                     className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
                     children: '🤖 Standard Hermes'
                   }),
-                  personas.length > 0 && jsxs('div', {
+                  listablePersonas.length > 0 && jsxs('div', {
                     children: [
-                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎭 PERSONAS (Fish when a twin exists)' }),
-                      personas.map(p =>
+                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎭 PERSONAS (complete packs · Fish when a twin exists)' }),
+                      listablePersonas.map(p =>
                         jsx(SelectItem, {
                           key: personaSelectionKey(p),
                           value: personaSelectionKey(p),
                           className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
                           children: `${p.avatar || '🎭'} ${p.name} · ${providerLabel(preferredProviderForPersona(p, voices))}`
-                        })
-                      )
-                    ]
-                  }),
-                  voices.length > 0 && jsxs('div', {
-                    children: [
-                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎙️ CLONES (Fish preferred; Voicebox is explicit/slow)' }),
-                      voices.map(v =>
-                        jsx(SelectItem, {
-                          key: voiceSelectionKey(v),
-                          value: voiceSelectionKey(v),
-                          className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
-                          children: `${v.voice_type === 'cloned' ? '👤' : '🌟'} ${v.name} · ${providerLabel(v.provider)}`
                         })
                       )
                     ]
@@ -811,6 +836,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
   const [systemPrompt, setSystemPrompt] = useState('');
   const [speed, setSpeed] = useState(1.0);
   const [temperature, setTemperature] = useState(0.7);
+  const [characterStrength, setCharacterStrength] = useState(25);
 
   // Audition state
   const [previewText, setPreviewText] = useState('Hello Chuck! This is your voice persona ready to roll.');
@@ -1025,7 +1051,8 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
           voice_id: selectedVoice,
           voice_name: chosenV ? chosenV.name : selectedVoice,
           speed: parseFloat(speed),
-          temperature: parseFloat(temperature)
+          temperature: parseFloat(temperature),
+          character_strength: normalizeCharacterStrength(characterStrength)
         })
       });
       if (res.ok) {
@@ -1261,7 +1288,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
               children: [
                 jsxs('div', {
                   children: [
-                    jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Speed:', `${speed}x`] }),
+                    jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Speed (TTS):', `${speed}x`] }),
                     jsx('input', {
                       type: 'range',
                       min: '0.7',
@@ -1275,7 +1302,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                 }),
                 jsxs('div', {
                   children: [
-                    jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Temperature / Expressiveness:', `${temperature}`] }),
+                    jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Temperature / Expressiveness (TTS only):', `${temperature}`] }),
                     jsx('input', {
                       type: 'range',
                       min: '0.1',
@@ -1284,6 +1311,31 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                       value: temperature,
                       onChange: (e) => setTemperature(e.target.value),
                       className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1'
+                    })
+                  ]
+                }),
+                jsxs('div', {
+                  className: 'col-span-2',
+                  children: [
+                    jsxs('label', {
+                      className: 'text-xs font-medium flex justify-between',
+                      children: [
+                        'Character strength (LLM style — not TTS):',
+                        `${characterStrengthLabel(characterStrength)} (${characterStrength})`
+                      ]
+                    }),
+                    jsx('input', {
+                      type: 'range',
+                      min: '0',
+                      max: '100',
+                      step: '1',
+                      value: characterStrength,
+                      onChange: (e) => setCharacterStrength(e.target.value),
+                      className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1'
+                    }),
+                    jsx('p', {
+                      className: 'text-[10px] text-muted-foreground mt-1',
+                      children: 'Soft = current light overlay. Medium = prefer this character’s voice. Strong = emphatic character while still doing the profile job. Temperature above is TTS-only.'
                     })
                   ]
                 })

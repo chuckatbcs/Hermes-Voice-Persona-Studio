@@ -47,6 +47,7 @@ class CreatePersonaRequest(BaseModel):
     voice_name: str
     speed: float = 1.0
     temperature: float = 0.7
+    character_strength: Optional[Any] = "soft"
     tags: Optional[List[str]] = None
 
 
@@ -76,6 +77,7 @@ class SessionApplyRequest(BaseModel):
     voice_id: Optional[str] = None
     voice_name: Optional[str] = None
     persona_id: Optional[str] = None
+    character_strength: Optional[Any] = None
 
 
 @router.get("/status")
@@ -221,8 +223,19 @@ async def clone_voice(
 
 
 @router.get("/personas")
-def list_personas() -> List[Dict[str, Any]]:
-    return [p.to_dict() for p in storage.list_personas()]
+def list_personas(listable: bool = False) -> List[Dict[str, Any]]:
+    voices = persona_sync.collect_provider_voices(PROVIDERS) if listable else ()
+    out: List[Dict[str, Any]] = []
+    for bundle in storage.list_personas():
+        data = bundle.to_dict()
+        data["character_strength"] = persona_sync.normalize_character_strength(
+            bundle.character_strength
+        )
+        data["listable"] = persona_sync.is_listable_persona_pack(bundle, voices or None)
+        if listable and not data["listable"]:
+            continue
+        out.append(data)
+    return out
 
 
 @router.post("/sync-from-voices")
@@ -291,6 +304,7 @@ def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
         voice_name=req.voice_name,
         speed=req.speed,
         temperature=req.temperature,
+        character_strength=persona_sync.normalize_character_strength(req.character_strength),
         tags=req.tags or [],
     )
     saved = storage.save_persona(bundle)
@@ -355,6 +369,11 @@ def reset_all_session_overlays() -> Dict[str, Any]:
 def apply_session_overlay(profile_id: str, req: SessionApplyRequest) -> Dict[str, Any]:
     """Apply persona + voice for this chat session; stash stock Hermes for the next new chat."""
     try:
+        strength = req.character_strength
+        if strength in (None, "") and req.persona_id:
+            bundle = storage.get_persona(req.persona_id)
+            if bundle is not None:
+                strength = bundle.character_strength
         return session_overlay.apply_session_overlay(
             profile_id,
             persona_name=req.persona_name,
@@ -362,6 +381,7 @@ def apply_session_overlay(profile_id: str, req: SessionApplyRequest) -> Dict[str
             provider=req.provider,
             voice_id=req.voice_id,
             voice_name=req.voice_name,
+            character_strength=strength,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
