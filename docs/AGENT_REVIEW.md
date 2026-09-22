@@ -70,7 +70,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | Path | What changed |
 |---|---|
 | `desktop/plugin.js` | Unified apply through **session overlay** (stash + apply + watch next new chat). Clone **or** persona → ensure bundle → Fish-prefer `resolve-tts` → `POST .../session/apply` → `host.newChat` for *this* session only. Startup `POST /session/reset-all` (no auto-apply). Titlebar lists **Fish + Voicebox**. Poll 60s + focus refresh. |
-| `backend/session_overlay.py` | **New.** `.studio-session.json` stashes pre-apply personality + TTS; restore on new session. Unusable stash / first-run stock → **edge / en-US-AriaNeural**. Never writes Voicebox `voice: default` or invents Jarvis as stock. |
+| `backend/session_overlay.py` | **New.** `.studio-session.json` stashes pre-apply personality, **`agent.system_prompt`**, and TTS; restore on new session. Unusable stash / first-run stock → **edge / en-US-AriaNeural**. Never writes Voicebox `voice: default` or invents Jarvis as stock. Catalog personality dicts are not active. |
 | `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; Edge voice read from `tts.edge.voice`. |
 | `backend/api.py` | Clone returns `{voice, persona}`. `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
 | `backend/persona_sync.py` | Scored name-match (strip Fish `Hermes ` prefix). `Eric Cartman` prefers `Hermes eric_cartman` over `Hermes cartman`. Profile Fish clone-map may win. Fish-prefer resolve; do not downgrade Fish bindings to Voicebox. |
