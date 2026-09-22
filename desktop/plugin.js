@@ -52,18 +52,39 @@ function fallbackSystemPrompt(name, description) {
   return `You are ${label}. Stay in character while remaining helpful and answering the user's questions.`;
 }
 
+function slugifyName(value) {
+  let slug = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  while (slug.startsWith('hermes_')) slug = slug.slice(7).replace(/^_+/, '');
+  return slug;
+}
+
+function nameTokens(value) {
+  const stop = new Set(['the', 'a', 'an', 'of', 'and', 'my', 'voice', 'clone', 'hermes']);
+  return new Set(slugifyName(value).split('_').filter((t) => t && !stop.has(t)));
+}
+
+function nameMatchScore(needle, haystack) {
+  if (!needle || !haystack) return 0;
+  const ns = slugifyName(needle);
+  const hs = slugifyName(haystack);
+  if (!ns || !hs) return 0;
+  if (ns === hs) return 1000;
+  const nt = nameTokens(needle);
+  const ht = nameTokens(haystack);
+  if (!nt.size || !ht.size) return 0;
+  const ntArr = [...nt];
+  const htArr = [...ht];
+  const same = nt.size === ht.size && ntArr.every((t) => ht.has(t));
+  if (same) return 900;
+  if (ntArr.every((t) => ht.has(t))) return 400 + 20 * nt.size + 5 * ht.size;
+  if (htArr.every((t) => nt.has(t))) return 200 + 20 * ht.size;
+  let inter = 0;
+  nt.forEach((t) => { if (ht.has(t)) inter += 1; });
+  return inter ? 50 + 10 * inter : 0;
+}
+
 function namesMatch(left, right) {
-  const slug = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  const tokens = (value) => new Set(slug(value).split('_').filter((t) => t && !['the', 'a', 'an', 'of', 'and', 'my', 'voice', 'clone'].includes(t)));
-  const a = slug(left);
-  const b = slug(right);
-  if (a && a === b) return true;
-  const ta = tokens(left);
-  const tb = tokens(right);
-  for (const token of ta) {
-    if (tb.has(token)) return true;
-  }
-  return false;
+  return nameMatchScore(left, right) > 0;
 }
 
 function isFishProvider(provider) {
@@ -129,14 +150,19 @@ function preferredProviderForPersona(persona, voices) {
   if (isFishProvider(persona.provider) && persona.voice_id && persona.voice_id !== 'default') {
     return persona.provider;
   }
-  const names = [persona.name, persona.id, persona.voice_name];
-  const fishTwin = (voices || []).find(v =>
-    isFishProvider(v.provider) &&
-    v.voice_type === 'cloned' &&
-    v.id && v.id !== 'default' &&
-    names.some(n => n && (namesMatch(n, v.name) || namesMatch(n, v.id)))
-  );
-  if (fishTwin) return fishTwin.provider;
+  const names = [persona.name, persona.id, persona.voice_name].filter(Boolean);
+  const richest = [...names].sort((a, b) => nameTokens(b).size - nameTokens(a).size || slugifyName(b).length - slugifyName(a).length)[0];
+  let best = null;
+  let bestScore = 0;
+  (voices || []).forEach((v) => {
+    if (!isFishProvider(v.provider) || v.voice_type !== 'cloned' || !v.id || v.id === 'default') return;
+    const score = Math.max(nameMatchScore(richest, v.name), nameMatchScore(richest, v.id));
+    if (score > bestScore) {
+      bestScore = score;
+      best = v;
+    }
+  });
+  if (best) return best.provider;
   return persona.provider || 'voicebox';
 }
 
@@ -148,12 +174,53 @@ function focusedProfile() {
   }
 }
 
+function focusedSessionId() {
+  try {
+    const atom = host.state && host.state.focusedSessionId;
+    return atom && typeof atom.get === 'function' ? (atom.get() || null) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function focusedStoredSessionId() {
+  try {
+    const atom = host.state && host.state.focusedStoredSessionId;
+    return atom && typeof atom.get === 'function' ? (atom.get() || null) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function subscribeFocusedSession(onChange) {
+  try {
+    const atom = host.state && host.state.focusedSessionId;
+    if (atom && typeof atom.subscribe === 'function') {
+      return atom.subscribe(() => onChange());
+    }
+  } catch (_) {}
+  const timer = setInterval(onChange, 400);
+  return () => clearInterval(timer);
+}
+
 async function startNewChat(profile) {
   if (typeof host.newChat !== 'function') return;
   try {
     await host.newChat(profile);
   } catch (err) {
     console.warn('[PersonaStudio] host.newChat failed:', err);
+  }
+}
+
+async function resetSessionOverlay(profile) {
+  try {
+    const res = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/session/reset`, {
+      method: 'POST'
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[PersonaStudio] session reset failed:', err);
+    return false;
   }
 }
 
@@ -260,8 +327,61 @@ function PersonaStudioRoot() {
 // ── Titlebar Persona Picker Component ─────────────────────────────────────
 function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, refreshVoices }) {
   const [activeId, setActiveId] = useState('default');
+  const overlayRef = useRef({ active: false, sessionId: null, applyInProgress: false });
 
-  // No local state — receives from parent
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let restored = false;
+      try {
+        const res = await fetch(`${API_BASE}/session/reset-all`, { method: 'POST' });
+        if (res.ok) {
+          const data = await res.json();
+          restored = (data.profiles || []).some((p) => p.restored || p.leftover_personality_cleared);
+        }
+      } catch (err) {
+        console.warn('[PersonaStudio] startup session reset-all failed:', err);
+      }
+      if (cancelled) return;
+      overlayRef.current = { active: false, sessionId: null, applyInProgress: false };
+      setActiveId('default');
+      window.__ACTIVE_PERSONA_STUDIO__ = null;
+      if (restored) {
+        await startNewChat(focusedProfile());
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const onSessionChange = async () => {
+      const overlay = overlayRef.current;
+      if (overlay.applyInProgress) {
+        overlay.sessionId = focusedSessionId();
+        return;
+      }
+      if (!overlay.active) return;
+      const sid = focusedSessionId();
+      if (!sid || sid === overlay.sessionId) return;
+      const stored = focusedStoredSessionId();
+      overlay.active = false;
+      overlay.sessionId = null;
+      setActiveId('default');
+      window.__ACTIVE_PERSONA_STUDIO__ = null;
+      const profile = focusedProfile();
+      const ok = await resetSessionOverlay(profile);
+      if (ok && !stored) {
+        await startNewChat(profile);
+      }
+      if (ok) {
+        host.toast({
+          title: '🤖 Standard Hermes',
+          message: 'New chat uses stock Hermes text + voice (Studio overlay cleared)'
+        });
+      }
+    };
+    return subscribeFocusedSession(onSessionChange);
+  }, []);
 
   const onSelectPersona = async (id) => {
     console.log('[PersonaStudio] Selected:', id);
@@ -281,21 +401,21 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       : (selection.kind === 'legacy' ? voices.find(v => v.id === selection.id) : null);
 
     if (selection.kind === 'default' || id === 'default') {
+      overlayRef.current.applyInProgress = true;
       try {
-        const res = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/set-persona`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ persona_name: 'none', persona_prompt: '' })
-        });
-        if (res.ok) {
+        const ok = await resetSessionOverlay(profile);
+        if (ok) {
           await startNewChat(profile);
+          overlayRef.current = { active: false, sessionId: focusedSessionId(), applyInProgress: false };
           host.toast({
             title: '🤖 Standard Hermes',
-            message: `Personality overlay cleared on "${profile}"`
+            message: `This session uses stock Hermes on "${profile}"`
           });
         }
       } catch (e) {
         console.warn('[PersonaStudio] Failed to clear persona:', e);
+      } finally {
+        overlayRef.current.applyInProgress = false;
       }
       window.__ACTIVE_PERSONA_STUDIO__ = null;
       return;
@@ -337,27 +457,6 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     if (!bundle) return;
 
     const prompt = (bundle.system_prompt || '').trim() || fallbackSystemPrompt(bundle.name, voiceMatch && voiceMatch.description);
-    let textApplied = false;
-    try {
-      const res = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/set-persona`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          persona_name: bundle.name,
-          persona_prompt: prompt
-        })
-      });
-      if (res.ok) {
-        textApplied = true;
-        const data = await res.json();
-        console.log('[PersonaStudio] Persona set:', data);
-      } else {
-        console.warn('[PersonaStudio] Persona set failed');
-      }
-    } catch (e) {
-      console.warn('[PersonaStudio] Persona set error:', e);
-    }
-
     let boundProvider = bundle.provider || (voiceMatch && voiceMatch.provider) || 'voicebox';
     let boundVoiceId = (bundle.voice_id && bundle.voice_id !== 'default') ? bundle.voice_id : (voiceMatch && voiceMatch.id);
     let boundVoiceName = bundle.voice_name || (voiceMatch && voiceMatch.name) || boundVoiceId;
@@ -370,7 +469,8 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
           persona_id: bundle.id,
           voice_id: voiceMatch ? voiceMatch.id : (bundle.voice_id || null),
           provider: voiceMatch ? voiceMatch.provider : (selection.explicit ? selection.provider : null),
-          explicit: !!selection.explicit
+          explicit: !!selection.explicit,
+          profile_id: profile
         })
       });
       if (resolveRes.ok) {
@@ -386,44 +486,46 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       console.warn('[PersonaStudio] TTS resolve error, using bundle voice:', e);
     }
 
-    let voiceApplied = false;
-    if (boundVoiceId && boundVoiceId !== 'default') {
-      try {
-        const assignRes = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/assign-voice`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: boundProvider,
-            voice_id: boundVoiceId,
-            voice_name: boundVoiceName
-          })
-        });
-        voiceApplied = assignRes.ok;
-        if (!assignRes.ok) {
-          console.warn('[PersonaStudio] Voice assignment failed');
-        }
-      } catch (e) {
-        console.warn('[PersonaStudio] Voice assignment error:', e);
+    overlayRef.current.applyInProgress = true;
+    let applied = false;
+    try {
+      const applyRes = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/session/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          persona_id: bundle.id,
+          persona_name: bundle.name,
+          persona_prompt: prompt,
+          provider: boundProvider,
+          voice_id: boundVoiceId && boundVoiceId !== 'default' ? boundVoiceId : null,
+          voice_name: boundVoiceName
+        })
+      });
+      applied = applyRes.ok;
+      if (applyRes.ok) {
+        await startNewChat(profile);
+        overlayRef.current.active = true;
+        overlayRef.current.sessionId = focusedSessionId();
+      } else {
+        console.warn('[PersonaStudio] Session apply failed');
       }
-    }
-
-    if (textApplied) {
-      await startNewChat(profile);
+    } catch (e) {
+      console.warn('[PersonaStudio] Session apply error:', e);
+    } finally {
+      setTimeout(() => { overlayRef.current.applyInProgress = false; }, 500);
     }
 
     const ttsLabel = providerLabel(boundProvider);
     host.toast({
       title: `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
-      message: textApplied && voiceApplied
-        ? `Prompt + ${ttsLabel} voice applied to "${profile}"`
-        : textApplied
-          ? `Prompt applied to "${profile}"` + (boundVoiceId && boundVoiceId !== 'default' ? ' (voice assignment failed)' : '')
-          : voiceApplied
-            ? `${ttsLabel} voice applied to "${profile}" (prompt apply failed)`
-            : `Failed to apply speaking persona on "${profile}"`
+      message: applied
+        ? `Prompt + ${ttsLabel} voice applied to this chat. Next new chat returns to stock Hermes.`
+        : `Failed to apply speaking persona on "${profile}"`
     });
 
-    window.__ACTIVE_PERSONA_STUDIO__ = { ...bundle, apply_provider: boundProvider, apply_voice_id: boundVoiceId, apply_reason: resolveReason };
+    window.__ACTIVE_PERSONA_STUDIO__ = applied
+      ? { ...bundle, apply_provider: boundProvider, apply_voice_id: boundVoiceId, apply_reason: resolveReason, scope: 'session' }
+      : null;
   };
 
   const currentLookup = lookupSelection(activeId, personas, voices);
@@ -805,7 +907,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
         jsxs(DialogHeader, {
           children: [
             jsx(DialogTitle, { className: 'text-lg font-bold flex items-center gap-2', children: '🎙️ Hermes Voice & Persona Studio' }),
-            jsx('p', { className: 'text-xs text-muted-foreground', children: 'Create, clone, audition, and bind speaking personas with Fish Audio & local Voicebox GPU.' })
+            jsx('p', { className: 'text-xs text-muted-foreground', children: 'Design voices and persona bundles here. Use the titlebar dropdown to apply a speaking persona to the current chat only — new chats stay stock Hermes.' })
           ]
         }),
 
@@ -1038,7 +1140,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                         '🤖 Assign Voice to Hermes Bot / Profile',
                         jsx('span', {
                           className: 'text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-medium',
-                          children: 'Used in Group Chats & Direct Replies'
+                          children: 'Group chats only — not a default for new chats'
                         })
                       ]
                     }),

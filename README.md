@@ -89,7 +89,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 ### 1. Launching the Studio
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **persona** applies LLM system text **and** a TTS voice. If a **Fish Audio** clone matches the persona name, Studio binds Fish (typically a few seconds). Local **Voicebox / Qwen** remains available as an explicit `Name · Voicebox` clone choice; that path can take minutes on a loaded GPU.
+3. Picking a **persona** applies LLM system text **and** a TTS voice to **this chat only**. New chats return to stock Hermes. If a **Fish Audio** clone matches the persona name, Studio binds Fish (typically a few seconds). Local **Voicebox / Qwen** remains available as an explicit `Name · Voicebox` clone choice; that path can take minutes on a loaded GPU. Persona Studio is for designing bundles; the titlebar dropdown is how you assign one when you want it.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
@@ -108,7 +108,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 2. Select your base engine model.
 3. Choose a reference audio sample (`.wav`, `.mp3`, `.m4a`).
 4. Click **`🎙️ Clone Voice & Register`**.
-5. Studio registers the TTS clone **and** writes `~/.hermes/personas/<slug>/` (system prompt from the clone description, or a short “You are {name}…” fallback). Use **Save Persona** if you want a custom prompt/avatar; use the titlebar to apply prompt + voice to the focused profile.
+5. Studio registers the TTS clone **and** writes `~/.hermes/personas/<slug>/` (system prompt from the clone description, or a short “You are {name}…” fallback). Use **Save Persona** if you want a custom prompt/avatar; use the titlebar to apply prompt + voice to the **current chat**. The next new chat is stock Hermes again.
 
 ### 5. Managing Duplicates & Re-sampling
 1. Click **`[ ⚙️ Manage ]`** next to the voice selector.
@@ -127,6 +127,10 @@ The companion service runs at `http://127.0.0.1:17495`.
 | `/api/studio/status` | `GET` | Health check and provider availability |
 | `/api/studio/voices?provider={p}` | `GET` | List voices. Omit `provider` to return **Fish + Voicebox** |
 | `/api/studio/resolve-tts` | `POST` | Prefer a Fish clone twin unless `explicit` selected Voicebox |
+| `/api/studio/session/state` | `GET` | Session overlay stash status (`?profile_id=`) |
+| `/api/studio/session/reset-all` | `POST` | Restore leftover overlays on plugin startup (no auto-apply) |
+| `/api/studio/profiles/{id}/session/apply` | `POST` | Apply persona + voice for this chat; stash stock Hermes |
+| `/api/studio/profiles/{id}/session/reset` | `POST` | Restore stashed stock Hermes personality + TTS |
 | `/api/studio/models?provider={p}` | `GET` | List synthesis engines (Qwen, Chatterbox, etc.) |
 | `/api/studio/audition` | `POST` | Generate real-time preview audio from text |
 | `/api/studio/clone` | `POST` | Upload audio, register the cloned voice, **and** create/update the matching persona bundle |

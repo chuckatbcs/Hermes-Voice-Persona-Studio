@@ -25,6 +25,10 @@ def managed_index_path() -> Path:
     return personas_root() / ".studio-managed.json"
 
 
+def session_state_path() -> Path:
+    return personas_root() / ".studio-session.json"
+
+
 def config_path_for_profile(profile_id: str) -> Path:
     if profile_id == "default":
         return hermes_home() / "config.yaml"

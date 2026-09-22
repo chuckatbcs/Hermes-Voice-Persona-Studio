@@ -12,6 +12,9 @@ from .providers.voicebox import VoiceboxProvider
 from .storage import PersonaBundle, PersonaStorage
 from . import bot_profiles
 from . import persona_sync
+from . import session_overlay
+from .config_io import get_dotted, load_yaml
+from .paths import config_path_for_profile
 
 router = APIRouter(prefix="/api/studio", tags=["PersonaStudio"])
 storage = PersonaStorage()
@@ -63,6 +66,16 @@ class ResolveTtsRequest(BaseModel):
     voice_id: Optional[str] = None
     provider: Optional[str] = None
     explicit: bool = False
+    profile_id: Optional[str] = None
+
+
+class SessionApplyRequest(BaseModel):
+    persona_name: str
+    persona_prompt: str
+    provider: Optional[str] = None
+    voice_id: Optional[str] = None
+    voice_name: Optional[str] = None
+    persona_id: Optional[str] = None
 
 
 @router.get("/status")
@@ -219,6 +232,19 @@ def sync_from_voices() -> Dict[str, Any]:
     return persona_sync.sync_personas_from_voices(storage, voices)
 
 
+def _fish_clone_map_for_profile(profile_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not profile_id:
+        return None
+    path = config_path_for_profile(profile_id)
+    if not path.exists():
+        return None
+    try:
+        clones = get_dotted(load_yaml(path), "tts.providers.fish.clones")
+    except Exception:
+        return None
+    return clones if isinstance(clones, dict) else None
+
+
 @router.post("/resolve-tts")
 def resolve_tts(req: ResolveTtsRequest) -> Dict[str, Any]:
     """Prefer a Fish clone twin unless the caller explicitly selected Voicebox."""
@@ -246,6 +272,7 @@ def resolve_tts(req: ResolveTtsRequest) -> Dict[str, Any]:
         selected_voice=selected,
         voices=voices,
         explicit=req.explicit,
+        clone_map=_fish_clone_map_for_profile(req.profile_id),
     )
     return {"ok": True, **result}
 
@@ -304,5 +331,48 @@ def set_bot_persona(profile_id: str, req: SetPersonaRequest) -> Dict[str, Any]:
             persona_name=req.persona_name,
             persona_prompt=req.persona_prompt,
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/session/state")
+def get_session_overlay_state(profile_id: Optional[str] = None) -> Dict[str, Any]:
+    if profile_id:
+        return session_overlay.overlay_status(profile_id)
+    return session_overlay.load_session_state()
+
+
+@router.post("/session/reset-all")
+def reset_all_session_overlays() -> Dict[str, Any]:
+    """Clear leftover Studio overlays on plugin startup. Does not auto-apply anything."""
+    try:
+        return session_overlay.reset_all_session_overlays()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/profiles/{profile_id}/session/apply")
+def apply_session_overlay(profile_id: str, req: SessionApplyRequest) -> Dict[str, Any]:
+    """Apply persona + voice for this chat session; stash stock Hermes for the next new chat."""
+    try:
+        return session_overlay.apply_session_overlay(
+            profile_id,
+            persona_name=req.persona_name,
+            persona_prompt=req.persona_prompt,
+            provider=req.provider,
+            voice_id=req.voice_id,
+            voice_name=req.voice_name,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/profiles/{profile_id}/session/reset")
+def reset_session_overlay(profile_id: str) -> Dict[str, Any]:
+    """Restore stashed stock Hermes personality + TTS for the next session."""
+    try:
+        return session_overlay.reset_session_overlay(profile_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

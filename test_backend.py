@@ -306,6 +306,74 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         self.assertEqual(resolved["voice_id"], "fish-jarvis")
         self.assertEqual(resolved["reason"], "fish-twin-by-name")
 
+    def test_resolve_hermes_prefixed_fish_names(self):
+        voices = [
+            VoiceInfo(id="fish-jarvis", name="Hermes jarvis", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-kitt", name="Hermes kitt", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-cartman", name="Hermes cartman", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="fish-eric", name="Hermes eric_cartman", provider="fish_audio", voice_type="cloned"),
+        ]
+        jarvis = PersonaBundle(
+            id="jarvis",
+            name="Jarvis (Tech Butler)",
+            avatar="🤖",
+            system_prompt="You are Jarvis.",
+            provider="voicebox",
+            voice_id="vb-jarvis",
+            voice_name="Jarvis",
+        )
+        kitt = PersonaBundle(
+            id="kitt",
+            name="KITT",
+            avatar="🚗",
+            system_prompt="You are KITT.",
+            provider="voicebox",
+            voice_id="vb-kitt",
+            voice_name="KITT",
+        )
+        cartman = PersonaBundle(
+            id="cartman",
+            name="Eric Cartman",
+            avatar="🧢",
+            system_prompt="Respect my authoritah.",
+            provider="voicebox",
+            voice_id="vb-cartman",
+            voice_name="Cartman",
+        )
+        self.assertEqual(
+            persona_sync.resolve_tts_for_apply(bundle=jarvis, voices=voices)["voice_id"],
+            "fish-jarvis",
+        )
+        self.assertEqual(
+            persona_sync.resolve_tts_for_apply(bundle=kitt, voices=voices)["voice_id"],
+            "fish-kitt",
+        )
+        cartman_r = persona_sync.resolve_tts_for_apply(bundle=cartman, voices=voices)
+        self.assertEqual(cartman_r["voice_id"], "fish-eric")
+        self.assertEqual(cartman_r["voice_name"], "Hermes eric_cartman")
+
+    def test_resolve_prefers_profile_clone_map_key(self):
+        bundle = PersonaBundle(
+            id="cartman",
+            name="Eric Cartman",
+            avatar="🧢",
+            system_prompt="Respect my authoritah.",
+            provider="voicebox",
+            voice_id="vb-cartman",
+            voice_name="Cartman",
+        )
+        voices = [
+            VoiceInfo(id="id-cartman", name="Hermes cartman", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="id-eric", name="Hermes eric_cartman", provider="fish_audio", voice_type="cloned"),
+        ]
+        resolved = persona_sync.resolve_tts_for_apply(
+            bundle=bundle,
+            voices=voices,
+            clone_map={"eric_cartman": "id-eric", "cartman": "id-cartman"},
+        )
+        self.assertEqual(resolved["voice_id"], "id-eric")
+        self.assertEqual(resolved["reason"], "profile-fish-clone-map")
+
 
 class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
     def _write_config(self, extra: str = "") -> Path:
@@ -402,6 +470,119 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         self._write_config()
         profiles = bot_profiles.list_bot_profiles()
         self.assertTrue(any(p["id"] == "default" for p in profiles))
+
+
+class TestSessionOverlay(IsolatedHermesHomeTest):
+    def _write_config(self) -> Path:
+        cfg = self.home / "config.yaml"
+        cfg.write_text(
+            "model: keep-me\n"
+            "tts:\n"
+            "  provider: fish\n"
+            "  providers:\n"
+            "    fish:\n"
+            "      voice: mechanic_default\n"
+            "      clones:\n"
+            "        mechanic_default: old-id\n"
+            "        eric_cartman: cartman-id\n"
+            "display:\n"
+            "  personality: ''\n",
+            encoding="utf-8",
+        )
+        return cfg
+
+    def test_apply_stashes_and_reset_restores_stock(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        apply = session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            cfg_path=cfg,
+        )
+        self.assertTrue(apply["ok"])
+        self.assertEqual(apply["scope"], "session")
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(after["display"]["personality"], "eric_cartman")
+        self.assertEqual(after["tts"]["provider"], "fish")
+        self.assertEqual(after["tts"]["providers"]["fish"]["voice"], "hermes_eric_cartman")
+        self.assertTrue(session_overlay.overlay_status("default")["active"])
+
+        reset = session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        self.assertTrue(reset["restored"])
+        restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(restored["display"]["personality"], "")
+        self.assertEqual(restored["tts"]["provider"], "fish")
+        self.assertEqual(restored["tts"]["providers"]["fish"]["voice"], "mechanic_default")
+        self.assertEqual(restored["model"], "keep-me")
+        self.assertFalse(session_overlay.overlay_status("default")["active"])
+
+    def test_second_apply_does_not_overwrite_stash(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            cfg_path=cfg,
+        )
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Jarvis",
+            persona_prompt="You are Jarvis.",
+            provider="fish_audio",
+            voice_id="jarvis-id",
+            voice_name="Hermes jarvis",
+            cfg_path=cfg,
+        )
+        session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(restored["display"]["personality"], "")
+        self.assertEqual(restored["tts"]["providers"]["fish"]["voice"], "mechanic_default")
+
+    def test_reset_without_stash_clears_studio_personality_only(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        bot_profiles.set_profile_persona(
+            "default", "Eric Cartman", "You are Eric Cartman.", cfg_path=cfg
+        )
+        bot_profiles.assign_voice_to_profile(
+            "default", "fish_audio", "cartman-id", "Hermes eric_cartman", cfg_path=cfg
+        )
+        # No session stash: leftover sticky overlay from an older apply.
+        reset = session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        self.assertTrue(reset["leftover_personality_cleared"])
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(data["display"]["personality"], "")
+        self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "hermes_eric_cartman")
+
+    def test_reset_all_clears_active_overlay(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="KITT",
+            persona_prompt="You are KITT.",
+            provider="fish_audio",
+            voice_id="kitt-id",
+            voice_name="Hermes kitt",
+            cfg_path=cfg,
+        )
+        report = session_overlay.reset_all_session_overlays()
+        self.assertTrue(report["ok"])
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(data["display"]["personality"], "")
+        self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "mechanic_default")
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):

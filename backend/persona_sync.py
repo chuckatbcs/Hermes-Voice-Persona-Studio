@@ -19,7 +19,7 @@ GENERIC_DESCRIPTION_PREFIXES = (
     "re-sampled voice reference",
 )
 
-STOP_TOKENS = frozenset({"the", "a", "an", "of", "and", "my", "voice", "clone"})
+STOP_TOKENS = frozenset({"the", "a", "an", "of", "and", "my", "voice", "clone", "hermes"})
 
 FISH_PROVIDERS = frozenset({"fish", "fish_audio"})
 PREFERRED_TTS_PROVIDER = "fish_audio"
@@ -30,8 +30,16 @@ def slugify_persona_id(name: str) -> str:
     return slug or "persona"
 
 
+def normalize_voice_slug(name: str) -> str:
+    """Slug used for TTS matching. Strips a leading ``hermes_`` Fish-list prefix."""
+    slug = slugify_persona_id(name)
+    while slug.startswith("hermes_"):
+        slug = slug[len("hermes_") :].lstrip("_")
+    return slug or slugify_persona_id(name)
+
+
 def name_tokens(name: str) -> set:
-    tokens = set(slugify_persona_id(name).split("_"))
+    tokens = set(normalize_voice_slug(name).split("_"))
     return {t for t in tokens if t and t not in STOP_TOKENS}
 
 
@@ -53,13 +61,36 @@ def provider_rank(provider: Optional[str]) -> int:
 
 
 def names_match(left: str, right: str) -> bool:
-    if not left or not right:
-        return False
-    a, b = slugify_persona_id(left), slugify_persona_id(right)
-    if a == b:
-        return True
-    ta, tb = name_tokens(left), name_tokens(right)
-    return bool(ta and tb and (ta & tb))
+    return name_match_score(left, right) > 0
+
+
+def name_match_score(needle: str, haystack: str) -> int:
+    """Higher is a better TTS twin. 0 means no usable match.
+
+    Exact slug (after stripping a Fish ``Hermes `` prefix) wins. Equal token
+    sets beat subsets, so ``Eric Cartman`` prefers ``Hermes eric_cartman``
+    over the shorter ``Hermes cartman`` twin.
+    """
+    if not needle or not haystack:
+        return 0
+    ns, hs = normalize_voice_slug(needle), normalize_voice_slug(haystack)
+    if not ns or not hs:
+        return 0
+    if ns == hs:
+        return 1000
+    nt, ht = name_tokens(needle), name_tokens(haystack)
+    if not nt or not ht:
+        return 0
+    if nt == ht:
+        return 900
+    if nt < ht:
+        return 400 + 20 * len(nt) + 5 * len(ht)
+    if ht < nt:
+        return 200 + 20 * len(ht)
+    inter = nt & ht
+    if inter:
+        return 50 + 10 * len(inter)
+    return 0
 
 
 def is_generic_voice_description(description: Optional[str]) -> bool:
@@ -209,6 +240,34 @@ def _usable_clone(info: VoiceInfo) -> bool:
     return info.voice_type in ("cloned", "custom")
 
 
+def _ranked_needles(names: Iterable[str]) -> List[str]:
+    unique: List[str] = []
+    seen = set()
+    for name in names:
+        if not name or name in seen:
+            continue
+        unique.append(name)
+        seen.add(name)
+    unique.sort(
+        key=lambda n: (len(name_tokens(n)), len(normalize_voice_slug(n))),
+        reverse=True,
+    )
+    return unique
+
+
+def _best_score_against_names(names: Sequence[str], *candidates: Optional[str]) -> int:
+    """Score the richest needle first so id ``cartman`` cannot beat name ``Eric Cartman``."""
+    for needle in _ranked_needles(names):
+        best = 0
+        for cand in candidates:
+            if not cand:
+                continue
+            best = max(best, name_match_score(needle, cand))
+        if best > 0:
+            return best
+    return 0
+
+
 def find_name_matching_clones(
     names: Iterable[str],
     voices: Iterable[Any],
@@ -217,25 +276,61 @@ def find_name_matching_clones(
 ) -> List[VoiceInfo]:
     catalog = [_voice_as_info(v) for v in voices if _usable_clone(_voice_as_info(v))]
     needles = [n for n in names if n]
-    hits: List[VoiceInfo] = []
+    scored: List[tuple] = []
     seen = set()
     for info in catalog:
         if fish_only and not is_fish_provider(info.provider):
             continue
         if not fish_only and is_fish_provider(info.provider):
             continue
-        if any(names_match(needle, info.name) or names_match(needle, info.id) for needle in needles):
-            key = (info.provider, info.id)
-            if key not in seen:
-                seen.add(key)
-                hits.append(info)
-    hits.sort(
-        key=lambda v: (
-            0 if any(slugify_persona_id(n) == slugify_persona_id(v.name) for n in needles) else 1,
-            v.name.lower(),
-        )
+        score = _best_score_against_names(needles, info.name, info.id)
+        if score <= 0:
+            continue
+        key = (info.provider, info.id)
+        if key in seen:
+            continue
+        seen.add(key)
+        scored.append((score, info))
+    scored.sort(
+        key=lambda item: (-item[0], -len(name_tokens(item[1].name)), item[1].name.lower())
     )
-    return hits
+    return [info for _, info in scored]
+
+
+def match_fish_clone_map(
+    names: Iterable[str],
+    clone_map: Optional[Dict[str, Any]],
+    catalog: Sequence[VoiceInfo],
+) -> Optional[VoiceInfo]:
+    """Prefer the profile's configured Fish clone map when a key matches the persona."""
+    if not clone_map or not isinstance(clone_map, dict):
+        return None
+    needles = [n for n in names if n]
+    best_score = 0
+    best_id = None
+    best_key = None
+    for key, voice_id in clone_map.items():
+        if not key or not voice_id:
+            continue
+        score = _best_score_against_names(needles, str(key))
+        if score > best_score:
+            best_score = score
+            best_id = str(voice_id)
+            best_key = str(key)
+    if best_score < 200 or not best_id:
+        return None
+    exact = next(
+        (v for v in catalog if is_fish_provider(v.provider) and v.id == best_id and _usable_clone(v)),
+        None,
+    )
+    if exact:
+        return exact
+    return VoiceInfo(
+        id=best_id,
+        name=best_key or best_id,
+        provider=PREFERRED_TTS_PROVIDER,
+        voice_type="cloned",
+    )
 
 
 def preferred_provider_for_persona(
@@ -255,6 +350,7 @@ def resolve_tts_for_apply(
     selected_voice: Optional[Any] = None,
     voices: Iterable[Any] = (),
     explicit: bool = False,
+    clone_map: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Pick TTS for a speaking-persona apply.
 
@@ -278,6 +374,15 @@ def resolve_tts_for_apply(
         names.extend([bundle.name, bundle.id, bundle.voice_name])
     if selected:
         names.extend([selected.name, selected.id])
+
+    mapped = match_fish_clone_map(names, clone_map, catalog)
+    if mapped:
+        return {
+            "provider": mapped.provider or PREFERRED_TTS_PROVIDER,
+            "voice_id": mapped.id,
+            "voice_name": mapped.name,
+            "reason": "profile-fish-clone-map",
+        }
 
     if bundle and is_fish_provider(bundle.provider) and bundle.voice_id and bundle.voice_id != "default":
         fish_exact = next(
