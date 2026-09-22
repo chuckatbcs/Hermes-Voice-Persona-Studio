@@ -1,8 +1,10 @@
 """Seed initial factory presets for PersonaStudio."""
 import json
+import os
+from copy import deepcopy
 from pathlib import Path
 
-STORAGE_ROOT = Path("/home/chuck/.hermes/personas")
+STORAGE_ROOT = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "personas"
 
 PRESETS = [
     {
@@ -45,10 +47,17 @@ PRESETS = [
 
 def seed():
     STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    for p in PRESETS:
+    for raw in PRESETS:
+        p = deepcopy(raw)
         pdir = STORAGE_ROOT / p["id"]
         pdir.mkdir(parents=True, exist_ok=True)
         prompt = p.pop("prompt")
+        existing_prompt = pdir / "prompt.md"
+        # Do not clobber a user-edited prompt; still refresh voice binding if
+        # the seeded voice_id is the Fish default and a later sync will rebind.
+        if existing_prompt.exists() and existing_prompt.read_text(encoding="utf-8").strip():
+            print(f"Preset already present, keeping prompt: {p['name']} -> {pdir}")
+            continue
         with open(pdir / "prompt.md", "w", encoding="utf-8") as f:
             f.write(prompt)
         with open(pdir / "manifest.json", "w", encoding="utf-8") as f:

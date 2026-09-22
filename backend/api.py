@@ -13,6 +13,7 @@ from .providers.fish_audio import FishAudioProvider
 from .providers.voicebox import VoiceboxProvider
 from .storage import PersonaBundle, PersonaStorage
 from . import bot_profiles
+from . import persona_sync
 
 router = APIRouter(prefix="/api/studio", tags=["PersonaStudio"])
 storage = PersonaStorage()
@@ -39,7 +40,7 @@ class CreatePersonaRequest(BaseModel):
     id: Optional[str] = None
     name: str
     avatar: str = "🤖"
-    system_prompt: str
+    system_prompt: str = ""
     provider: str = "voicebox"
     voice_id: str
     voice_name: str
@@ -194,7 +195,8 @@ async def clone_voice(
             engine=engine,
             reference_text=reference_text,
         )
-        return {"ok": True, "voice": vinfo.to_dict()}
+        persona = persona_sync.ensure_persona_for_voice(storage, vinfo)
+        return {"ok": True, "voice": vinfo.to_dict(), "persona": persona.to_dict()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -204,14 +206,22 @@ def list_personas() -> List[Dict[str, Any]]:
     return [p.to_dict() for p in storage.list_personas()]
 
 
+@router.post("/sync-from-voices")
+def sync_from_voices() -> Dict[str, Any]:
+    """Idempotently create/update persona bundles for existing TTS clones."""
+    voices = persona_sync.collect_provider_voices(PROVIDERS)
+    return persona_sync.sync_personas_from_voices(storage, voices)
+
+
 @router.post("/personas")
 def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
-    pid = req.id or req.name.lower().replace(" ", "_")
+    pid = req.id or persona_sync.slugify_persona_id(req.name)
+    prompt = (req.system_prompt or "").strip() or persona_sync.fallback_system_prompt(req.name)
     bundle = PersonaBundle(
         id=pid,
         name=req.name,
         avatar=req.avatar,
-        system_prompt=req.system_prompt,
+        system_prompt=prompt,
         provider=req.provider,
         voice_id=req.voice_id,
         voice_name=req.voice_name,

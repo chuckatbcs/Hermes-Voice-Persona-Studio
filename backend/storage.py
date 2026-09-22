@@ -56,6 +56,8 @@ class PersonaStorage:
     def list_personas(self) -> List[PersonaBundle]:
         bundles: List[PersonaBundle] = []
         for path in sorted(self.root_dir.iterdir()):
+            if path.name.startswith("."):
+                continue
             if path.is_dir() and (path / "manifest.json").exists():
                 try:
                     with open(path / "manifest.json", "r", encoding="utf-8") as f:
