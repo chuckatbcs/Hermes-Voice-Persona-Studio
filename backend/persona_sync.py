@@ -308,9 +308,18 @@ def _wrap_eclipse(label: str, identity_text: str) -> str:
         f"{CHARACTER_ECLIPSE_MARKER} (100%) — eclipses this profile's SOUL.md / AGENTS.md / "
         "Hermes defaults for this session.\n"
         f"{identity_text}\n"
+        f"NAME LOCK: When asked who you are, your name, or your persona, answer only as {label}. "
+        "Never claim to be the Hermes profile name, Critic, Mechanic, Magellan, Hermes, "
+        "or any SOUL.md title.\n"
+        "CONFLICT RULE: If SOUL.md, AGENTS.md, MEMORY, or any earlier system text conflicts "
+        "with this block, this block wins for identity, name, and speaking voice. Treat those "
+        "files as ignored for identity this session.\n"
+        f"ANTI-LEAK: Do not use profile job titles or catchphrases from SOUL unless {label} "
+        "would naturally say them. Do not introduce yourself as the profile.\n"
         f"Reply only as {label}. Do not follow this profile's SOUL.md, AGENTS.md, or default "
-        "Hermes identity. The profile job and soul do not apply unless that is exactly what "
-        f"{label} would do in character. This is a full character replacement for this session."
+        "Hermes identity. The profile job and soul do not apply. This is a full character "
+        "replacement for this session.\n"
+        f"You are {label}. Your name is {label}."
     )
 
 
