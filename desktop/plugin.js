@@ -73,10 +73,10 @@ function playAudioBase64(b64, mime = 'audio/wav') {
   }
 }
 
-// ── Titlebar Persona Picker Component ─────────────────────────────────────
-function TitlebarPersonaPicker({ openStudio }) {
+// ── Root Plugin Host Wrapper ──────────────────────────────────────────────
+function PersonaStudioRoot() {
+  const [studioOpen, setStudioOpen] = useState(false);
   const [personas, setPersonas] = useState([]);
-  const [activeId, setActiveId] = useState('default');
 
   const refreshPersonas = useCallback(async () => {
     try {
@@ -93,6 +93,20 @@ function TitlebarPersonaPicker({ openStudio }) {
     const interval = setInterval(refreshPersonas, 8000);
     return () => clearInterval(interval);
   }, [refreshPersonas]);
+
+  return jsxs(React.Fragment, {
+    children: [
+      jsx(TitlebarPersonaPicker, { openStudio: () => setStudioOpen(true), personas, refreshPersonas }),
+      jsx(StudioModal, { open: studioOpen, onOpenChange: setStudioOpen, refreshPersonas })
+    ]
+  });
+}
+
+// ── Titlebar Persona Picker Component ─────────────────────────────────────
+function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
+  const [activeId, setActiveId] = useState('default');
+
+  // No local state — receives from parent
 
   const onSelectPersona = async (id) => {
     if (id === '__open_studio__') {
@@ -155,7 +169,7 @@ function TitlebarPersonaPicker({ openStudio }) {
                       key: p.id,
                       value: p.id,
                       className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
-                      children: `${p.avatar || '🎙️'} ${p.name}`
+                      children: `${p.avatar || '🎙️'} ${p.name}${p.voice_name && p.voice_name !== 'Default' ? `  🎵 ${p.voice_name}` : ''}`
                     })
                   ),
                   jsx('div', { style: { height: '1px', background: 'var(--border)', margin: '4px 0' } }),
@@ -183,7 +197,7 @@ function TitlebarPersonaPicker({ openStudio }) {
 }
 
 // ── Voice & Persona Studio Dialog Modal ───────────────────────────────────
-function StudioModal({ open, onOpenChange }) {
+function StudioModal({ open, onOpenChange, refreshPersonas }) {
   const [provider, setProvider] = useState('voicebox');
   const [voices, setVoices] = useState([]);
   const [models, setModels] = useState([]);
@@ -411,6 +425,8 @@ function StudioModal({ open, onOpenChange }) {
           message: `Created '${name}' with ${chosenV ? chosenV.name : 'voice'} successfully!`
         });
         onOpenChange(false);
+        // Refresh the dropdown immediately
+        refreshPersonas?.();
       } else {
         alert('Failed to save persona.');
       }
@@ -890,19 +906,8 @@ function StudioModal({ open, onOpenChange }) {
   });
 }
 
-// ── Root Plugin Host Wrapper ──────────────────────────────────────────────
-function PersonaStudioRoot() {
-  const [studioOpen, setStudioOpen] = useState(false);
-
-  return jsxs(React.Fragment, {
-    children: [
-      jsx(TitlebarPersonaPicker, { openStudio: () => setStudioOpen(true) }),
-      jsx(StudioModal, { open: studioOpen, onOpenChange: setStudioOpen })
-    ]
-  });
-}
-
 // ── Export Default Hermes Plugin ──────────────────────────────────────────
+
 export default {
   id: PLUGIN_ID,
   name: 'Hermes PersonaStudio',
