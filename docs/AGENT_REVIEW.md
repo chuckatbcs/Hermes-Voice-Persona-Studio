@@ -48,6 +48,8 @@ A **speaking persona** is three things bound together:
 
 **Character strength (Charles, 2026-09-22, amended):** 0–100% slider. **0% = profile soul only** (no style overlay). **100% = character completely eclipses SOUL.md / AGENTS.md for this session.** Intermediate values blend. Soft/Medium/Heavy are snap labels only. Titlebar apply sends the pack’s stored percent. Temperature stays TTS-only.
 
+**Studio save / layout (Charles, Promax):** selecting Cartman did not hydrate `name`, so Save Persona alerted “Please enter a name.” Studio now hydrates the selected pack (name, prompt, strength, voice), **PUT** `/personas/{id}` updates in place, empty name falls back to the pack name, and Studio stays open after save. Window is sectioned top→bottom: Pick pack → Personality (LLM + strength) → Voice (TTS) → Clone → Apply/save.
+
 **Titlebar packs only (Charles, 2026-09-22):** hide voice-only clones that are not backed by a persona pack. After Promax cleanup, complete packs are amanda, cartman, flirty, jarvis, sexy_girl, vincent_price, voldemort. Incomplete stubs (hermes_default, hermes_porky_pig, kitt, storyteller) were deleted — do not auto-reseed them. Titlebar lists **complete packs** (non-stub prompt + usable cloned `voice_id`, or a Fish twin of that pack) plus Standard Hermes + Open Studio. Voice-only orphans stay in Studio for cloning/editing. **`install.py --sync-voices` must not recreate those deleted stubs** from name-only Fish clones (`Hermes kitt`); sync/ensure only create a pack when `fallback_system_prompt` is non-stub, but still rebind `voice_id` on existing cartman/jarvis.
 
 **Sticky leftover `agent.system_prompt` (earlier Promax mechanic retest):** empty `display.personality` + Edge Aria still answered as KITT because leftover `agent.system_prompt: You are K.I.T.T....` is used when no personality is named. Reset still stashes/restores that user-owned field (or `''` if the leftover matched a Studio catalog overlay). Studio must not put Cartman/KITT identity back into it on apply. Memories/`USER.md` “Active profile: kitt” can still bias the model (out of band).
@@ -87,10 +89,10 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Path | What changed |
 |---|---|
-| `desktop/plugin.js` | Unified apply through **session overlay**. Apply / Standard Hermes / startup **never** call `host.newChat`. Watcher resets **only** on stored-id New Chat. **Per-profile titlebar:** `focusedSessionProfile` change resets UI to stock (or that profile’s own overlay) and stocks a profile with no overlay so leftover Voicebox TTS cannot leak. Titlebar lists **complete persona packs only** (no voice-only CLONES section). Studio **Character strength 0–100%** (LLM; 0 = soul only, 100 = eclipse soul) next to Temperature (TTS only); apply sends pack percent. |
+| `desktop/plugin.js` | Unified apply through **session overlay**. Apply / Standard Hermes / startup **never** call `host.newChat`. Watcher resets **only** on stored-id New Chat. **Per-profile titlebar.** Titlebar lists **complete persona packs only**. Studio is a top-to-bottom workflow; selecting a pack hydrates the form; Save **PUT**s existing packs (strength persists) and stays open. |
 | `backend/session_overlay.py` | **New.** Stash/restore personality + user `agent.system_prompt` + TTS. Apply writes a **style overlay** catalog entry + `display.personality` + Fish-prefer TTS. Accepts **character_strength**. Does **not** clobber user `agent.system_prompt` with “You are Cartman”. Unusable stash → Edge AriaNeural. No-stash leftover reset **always** clears `display.personality` (untagged `cartman` included); `agent.system_prompt` only when Studio-injected. |
 | `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; catalog `system_prompt` is the style overlay (`source: hermes-personastudio`). |
-| `backend/api.py` | Clone returns `{voice, persona}`. `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
+| `backend/api.py` | Clone returns `{voice, persona}`. `PUT /personas/{id}` updates an existing pack (character strength, prompt, voice). `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
 | `backend/persona_sync.py` | `build_style_overlay_prompt` takes **0–100** strength (0 empty; 100 full eclipse). `is_listable_persona_pack` / stub helpers. `ensure`/`sync` skip creating stub packs from name-only Fish clones. Fallback/sync templates are mannerisms. Scored Fish name-match. Fish-prefer resolve. |
 | `backend/config_io.py` | **New.** Prefer Hermes `atomic_roundtrip_yaml_update`; else PyYAML mutate-only + atomic replace. |
 | `backend/managed_index.py` | **New.** `~/.hermes/personas/.studio-managed.json` snapshots prior values for purge. |
@@ -183,6 +185,10 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 5. **Profile switch (Magellan).** On mechanic, pick Cartman, then switch the focused bot to **Magellan** without applying again.
    - Titlebar must **not** keep Cartman as an implied apply. Expect Magellan **research soul** + **stock TTS** (Edge/Aria or Magellan stash), not Cartman voice without Cartman style.
    - Re-select Cartman on Magellan → Magellan that *speaks like* Cartman (research job + snark + Fish). `session/apply` must hit **magellan**.
+6. **Studio Save Persona (hydrate + PUT).** Open Studio → select Cartman → name/prompt/voice/strength must fill from the pack (no empty name). Set Character strength to **100%** → **Save/Update Persona**.
+   - Must **not** alert “Please enter a name.”
+   - Studio stays open; toast reports update + 100%.
+   - Re-open / re-select Cartman still shows 100%. Titlebar apply of Cartman must send 100% eclipse.
 
 ### Latency / Fish-prefer
 
@@ -225,6 +231,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 - [ ] `plugin.py` cannot remain in the install tree
 - [ ] Offline `python3 -m unittest test_backend.py -v` passes
 - [ ] README documents session vs sticky apply and Fish-prefer
+- [ ] Studio pack select hydrates name/prompt/strength/voice; Save **PUT**s existing packs and **POST**s new ones; empty name falls back to the selected pack; Studio stays open with a success toast
 - [ ] **Charles (`chuckatbcs`) explicitly approves merge**
 
 ---

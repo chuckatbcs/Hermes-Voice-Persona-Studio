@@ -219,6 +219,56 @@ function isListablePersonaPack(persona, voices) {
 }
 // TITLEBAR_PACK_END
 
+// STUDIO_FORM_BEGIN
+function hydrateFormFromPack(pack) {
+  if (!pack) return null;
+  const provider = isFishProvider(pack.provider) ? 'fish_audio' : (pack.provider || 'voicebox');
+  return {
+    id: pack.id || '',
+    name: pack.name || '',
+    avatar: pack.avatar || '🤖',
+    systemPrompt: pack.system_prompt || '',
+    provider: provider,
+    selectedVoice: pack.voice_id && pack.voice_id !== 'default' ? pack.voice_id : '',
+    speed: pack.speed != null ? pack.speed : 1.0,
+    temperature: pack.temperature != null ? pack.temperature : 0.7,
+    characterStrength: characterStrengthPercent(pack.character_strength)
+  };
+}
+
+function resolvePersonaSaveName(name, selectedPack) {
+  const typed = String(name || '').trim();
+  if (typed) return typed;
+  if (selectedPack && selectedPack.name) return String(selectedPack.name).trim();
+  return '';
+}
+
+function personaSaveRequest(fields) {
+  const selectedPack = fields.selectedPack || null;
+  const resolvedName = resolvePersonaSaveName(fields.name, selectedPack);
+  if (!resolvedName) return { error: 'Please enter a name for the Persona.' };
+  const id = String(fields.editingId || (selectedPack && selectedPack.id) || '').trim();
+  const isUpdate = !!id;
+  const body = {
+    name: resolvedName,
+    avatar: fields.avatar || '🤖',
+    system_prompt: fields.systemPrompt || '',
+    provider: fields.provider || 'voicebox',
+    voice_id: fields.selectedVoice || (selectedPack && selectedPack.voice_id) || 'default',
+    voice_name: fields.voiceName || fields.selectedVoice || resolvedName,
+    speed: parseFloat(fields.speed),
+    temperature: parseFloat(fields.temperature),
+    character_strength: characterStrengthPercent(fields.characterStrength)
+  };
+  if (isUpdate) body.id = id;
+  return {
+    method: isUpdate ? 'PUT' : 'POST',
+    url: isUpdate ? `/personas/${encodeURIComponent(id)}` : '/personas',
+    body: body
+  };
+}
+// STUDIO_FORM_END
+
 function preferredProviderForPersona(persona, voices) {
   if (!persona) return 'voicebox';
   if (isFishProvider(persona.provider) && persona.voice_id && persona.voice_id !== 'default') {
@@ -836,6 +886,9 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
   const [speed, setSpeed] = useState(1.0);
   const [temperature, setTemperature] = useState(0.7);
   const [characterStrength, setCharacterStrength] = useState(25);
+  const [studioPacks, setStudioPacks] = useState([]);
+  const [editingPackId, setEditingPackId] = useState('');
+  const pendingVoiceRef = useRef('');
 
   // Audition state
   const [previewText, setPreviewText] = useState('Hello Chuck! This is your voice persona ready to roll.');
@@ -870,7 +923,17 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
       if (vRes.ok) {
         const vList = await vRes.json();
         setVoices(vList);
-        if (vList.length > 0) setSelectedVoice(vList[0].id);
+        if (vList.length > 0) {
+          setSelectedVoice((prev) => {
+            const pending = pendingVoiceRef.current;
+            if (pending) {
+              pendingVoiceRef.current = '';
+              if (vList.some((v) => v.id === pending)) return pending;
+            }
+            if (prev && vList.some((v) => v.id === prev)) return prev;
+            return vList[0].id;
+          });
+        }
       }
       
       if (mRes.ok) {
@@ -895,11 +958,46 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
     }
   }, []);
 
+  const loadStudioPacks = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/personas`);
+      if (res.ok) setStudioPacks(await res.json());
+    } catch (_) {}
+  }, []);
+
   useEffect(() => {
     if (open) {
+      loadStudioPacks();
       loadData(provider);
     }
-  }, [open, provider, loadData]);
+  }, [open, provider, loadData, loadStudioPacks]);
+
+  const applyPackToForm = (pack) => {
+    const hydrated = hydrateFormFromPack(pack);
+    if (!hydrated) {
+      setEditingPackId('');
+      setName('');
+      setAvatar('🤖');
+      setSystemPrompt('');
+      setCharacterStrength(25);
+      setSpeed(1.0);
+      setTemperature(0.7);
+      return;
+    }
+    setEditingPackId(hydrated.id);
+    setName(hydrated.name);
+    setAvatar(hydrated.avatar);
+    setSystemPrompt(hydrated.systemPrompt);
+    setCharacterStrength(hydrated.characterStrength);
+    setSpeed(hydrated.speed);
+    setTemperature(hydrated.temperature);
+    if (hydrated.provider && hydrated.provider !== provider) {
+      pendingVoiceRef.current = hydrated.selectedVoice;
+      setProvider(hydrated.provider);
+    } else if (hydrated.selectedVoice) {
+      setSelectedVoice(hydrated.selectedVoice);
+    }
+  };
 
   // Delete voice from provider
   const handleDeleteVoice = async (voiceId, voiceName) => {
@@ -1031,36 +1129,47 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
     }
   };
 
-  // Save full Persona
+  // Save full Persona (PUT existing pack, POST new). Keep Studio open.
   const handleSavePersona = async () => {
-    if (!name) {
-      alert('Please enter a name for the Persona.');
+    const selectedPack = studioPacks.find((p) => p.id === editingPackId) || null;
+    const chosenV = voices.find(v => v.id === selectedVoice);
+    const plan = personaSaveRequest({
+      editingId: editingPackId,
+      name: name,
+      selectedPack: selectedPack,
+      avatar: avatar,
+      systemPrompt: systemPrompt,
+      provider: provider,
+      selectedVoice: selectedVoice,
+      voiceName: chosenV ? chosenV.name : selectedVoice,
+      speed: speed,
+      temperature: temperature,
+      characterStrength: characterStrength
+    });
+    if (plan.error) {
+      alert(plan.error);
       return;
     }
-    const chosenV = voices.find(v => v.id === selectedVoice);
     try {
-      const res = await fetch(`${API_BASE}/personas`, {
-        method: 'POST',
+      const res = await fetch(`${API_BASE}${plan.url}`, {
+        method: plan.method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name,
-          avatar: avatar || '🤖',
-          system_prompt: systemPrompt,
-          provider: provider,
-          voice_id: selectedVoice,
-          voice_name: chosenV ? chosenV.name : selectedVoice,
-          speed: parseFloat(speed),
-          temperature: parseFloat(temperature),
-          character_strength: characterStrengthPercent(characterStrength)
-        })
+        body: JSON.stringify(plan.body)
       });
       if (res.ok) {
+        const data = await res.json();
+        const saved = data.persona || {};
+        const strength = characterStrengthPercent(saved.character_strength != null ? saved.character_strength : plan.body.character_strength);
         host.toast({
-          title: 'Persona Saved',
-          message: `Created '${name}' with ${chosenV ? chosenV.name : 'voice'} successfully!`
+          title: plan.method === 'PUT' ? 'Persona Updated' : 'Persona Saved',
+          message: `${saved.name || plan.body.name} — Character strength ${strength}%`
         });
-        onOpenChange(false);
-        // Refresh the dropdown immediately
+        if (saved.id) {
+          setEditingPackId(saved.id);
+          setName(saved.name || plan.body.name);
+          if (saved.character_strength != null) setCharacterStrength(characterStrengthPercent(saved.character_strength));
+        }
+        await loadStudioPacks();
         refreshPersonas?.();
       } else {
         alert('Failed to save persona.');
@@ -1129,7 +1238,107 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
         jsxs('div', {
           className: 'space-y-4 my-4 max-h-[70vh] overflow-y-auto pr-2',
           children: [
-            // Provider Tabs
+            // 1. Pick / create pack
+            jsxs('div', {
+              className: 'p-3 border border-border/70 rounded-lg space-y-3 bg-muted/10',
+              children: [
+                jsx('div', { className: 'text-xs font-bold text-foreground', children: '1. Pick / create pack' }),
+                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Select an existing persona to edit (name, prompt, and Character strength hydrate from the pack). Choose New to create one.' }),
+                jsx('select', {
+                  value: editingPackId || '__new__',
+                  onChange: (e) => {
+                    const id = e.target.value;
+                    if (!id || id === '__new__') applyPackToForm(null);
+                    else applyPackToForm(studioPacks.find((p) => p.id === id) || null);
+                  },
+                  className: 'w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
+                  children: [
+                    jsx('option', { value: '__new__', children: '✨ New persona pack' }),
+                    ...(studioPacks || []).map((p) =>
+                      jsx('option', { key: p.id, value: p.id, children: `${p.avatar || '🎭'} ${p.name} (${characterStrengthPercent(p.character_strength)}%)` })
+                    )
+                  ]
+                }),
+                jsxs('div', {
+                  className: 'grid grid-cols-4 gap-2',
+                  children: [
+                    jsxs('div', {
+                      className: 'col-span-1',
+                      children: [
+                        jsx('label', { className: 'text-xs font-medium', children: 'Avatar:' }),
+                        jsx(Input, {
+                          value: avatar,
+                          onChange: (e) => setAvatar(e.target.value),
+                          className: 'text-xs h-8 text-center'
+                        })
+                      ]
+                    }),
+                    jsxs('div', {
+                      className: 'col-span-3',
+                      children: [
+                        jsx('label', { className: 'text-xs font-medium', children: 'Persona name:' }),
+                        jsx(Input, {
+                          value: name,
+                          onChange: (e) => setName(e.target.value),
+                          placeholder: editingPackId ? 'Uses selected pack name if left blank' : 'e.g. Jarvis Butler, Storyteller',
+                          className: 'text-xs h-8'
+                        })
+                      ]
+                    })
+                  ]
+                })
+              ]
+            }),
+
+            // 2. Personality (LLM)
+            jsxs('div', {
+              className: 'p-3 border border-primary/30 rounded-lg space-y-3 bg-primary/5',
+              children: [
+                jsx('div', { className: 'text-xs font-bold text-foreground', children: '2. Personality (LLM)' }),
+                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Speaking style for replies. Character strength is not TTS Temperature.' }),
+                jsxs('div', {
+                  children: [
+                    jsx('label', { className: 'text-xs font-medium', children: 'Speaking style / prompt:' }),
+                    jsx(Textarea, {
+                      value: systemPrompt,
+                      onChange: (e) => setSystemPrompt(e.target.value),
+                      placeholder: 'Define how this assistant speaks, vocabulary rules, mannerisms...',
+                      className: 'text-xs min-h-[90px]'
+                    })
+                  ]
+                }),
+                jsxs('div', {
+                  children: [
+                    jsxs('label', {
+                      className: 'text-xs font-medium flex justify-between',
+                      children: [
+                        'Character strength (LLM) — 0% = profile soul only, 100% = character replaces soul for this session:',
+                        `${characterStrengthLabel(characterStrength)} (${characterStrength}%)`
+                      ]
+                    }),
+                    jsx('input', {
+                      type: 'range',
+                      min: '0',
+                      max: '100',
+                      step: '1',
+                      value: characterStrength,
+                      onChange: (e) => setCharacterStrength(e.target.value),
+                      className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1'
+                    }),
+                    jsx('p', {
+                      className: 'text-[10px] text-muted-foreground mt-1',
+                      children: '0% = no style overlay (soul only). Soft 1–40 / Medium 41–70 / Heavy 71–99 blend character vs SOUL. 100% = character eclipses SOUL for this session.'
+                    })
+                  ]
+                })
+              ]
+            }),
+
+            // 3. Voice (TTS)
+            jsxs('div', {
+              className: 'p-3 border border-border/70 rounded-lg space-y-3',
+              children: [
+                jsx('div', { className: 'text-xs font-bold text-foreground', children: '3. Voice (TTS)' }),
             jsxs('div', {
               className: 'flex gap-2 p-1 bg-muted/30 rounded border border-border/40',
               children: [
@@ -1281,7 +1490,6 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
               ]
             }),
 
-            // Characteristics Sliders
             jsxs('div', {
               className: 'grid grid-cols-2 gap-4 p-3 bg-muted/20 border border-border/40 rounded',
               children: [
@@ -1312,31 +1520,6 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                       className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1'
                     })
                   ]
-                }),
-                jsxs('div', {
-                  className: 'col-span-2',
-                  children: [
-                    jsxs('label', {
-                      className: 'text-xs font-medium flex justify-between',
-                      children: [
-                        'Character strength (LLM) — 0% = profile soul only, 100% = character replaces soul for this session:',
-                        `${characterStrengthLabel(characterStrength)} (${characterStrength}%)`
-                      ]
-                    }),
-                    jsx('input', {
-                      type: 'range',
-                      min: '0',
-                      max: '100',
-                      step: '1',
-                      value: characterStrength,
-                      onChange: (e) => setCharacterStrength(e.target.value),
-                      className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1'
-                    }),
-                    jsx('p', {
-                      className: 'text-[10px] text-muted-foreground mt-1',
-                      children: '0% = no style overlay (soul only). Soft 1–40 / Medium 41–70 / Heavy 71–99 blend character vs SOUL. 100% = character eclipses SOUL for this session. Temperature above is TTS-only.'
-                    })
-                  ]
                 })
               ]
             }),
@@ -1365,61 +1548,11 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                   ]
                 })
               ]
-            }),
-
-            // Assign Selected Voice to Bot / Profile Section
-            jsxs('div', {
-              className: 'p-3 bg-secondary/15 border border-border/70 rounded space-y-2',
-              children: [
-                jsxs('div', {
-                  className: 'flex items-center justify-between',
-                  children: [
-                    jsx('label', {
-                      className: 'text-xs font-semibold text-foreground flex items-center gap-1.5',
-                      children: [
-                        '🤖 Assign Voice to Hermes Bot / Profile',
-                        jsx('span', {
-                          className: 'text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-medium',
-                          children: 'Group chats only — not a default for new chats'
-                        })
-                      ]
-                    }),
-                    botProfiles.length > 0 && selectedBotProfile && jsx('span', {
-                      className: 'text-[11px] text-muted-foreground',
-                      children: `Current: ${(botProfiles.find(b => b.id === selectedBotProfile)?.voice) || 'none'}`
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'flex gap-2 items-center',
-                  children: [
-                    jsx('select', {
-                      value: selectedBotProfile,
-                      onChange: (e) => setSelectedBotProfile(e.target.value),
-                      className: 'flex-1 h-8 rounded border border-border bg-background px-2 text-xs text-foreground',
-                      children: botProfiles.length === 0
-                        ? jsx('option', { value: '', children: 'No profiles detected' })
-                        : botProfiles.map(b =>
-                            jsx('option', {
-                              key: b.id,
-                              value: b.id,
-                              children: `${b.title} (${b.id}) [TTS: ${b.provider || 'none'}]`
-                            })
-                          )
-                    }),
-                    jsx(Button, {
-                      size: 'sm',
-                      onClick: handleAssignVoiceToBot,
-                      disabled: isAssigning || !selectedVoice || !selectedBotProfile,
-                      className: 'text-xs h-8 px-4 shrink-0 font-medium',
-                      children: isAssigning ? 'Applying...' : '🚀 Apply Voice to Bot'
-                    })
-                  ]
-                })
+            })
               ]
             }),
 
-            // Voice Cloning / Upload Section
+            // 4. Clone new voice
             jsxs('div', {
               className: 'p-3 border border-border/70 rounded-lg bg-card/50 space-y-3',
               children: [
@@ -1427,7 +1560,8 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                   className: 'flex items-center justify-between border-b border-border/40 pb-1.5',
                   children: [
                     jsx('label', { className: 'text-xs font-bold text-foreground flex items-center gap-1.5', children: [
-                      provider === 'fish_audio' ? '☁️ Upload Custom Clone to Fish Audio Cloud' : '⚡ Zero-Shot Voice Cloning (Local GPU)',
+                      '4. Clone new voice — ',
+                      provider === 'fish_audio' ? '☁️ Upload to Fish Audio Cloud' : '⚡ Zero-Shot (Local GPU)',
                       jsx('span', { className: 'text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-semibold', children: provider === 'fish_audio' ? 'Fish Cloud' : 'RTX PRO 2000' })
                     ] }),
                     jsx('span', { className: 'text-[10px] text-muted-foreground', children: 'WAV, MP3, or M4A audio sample' })
@@ -1491,46 +1625,54 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
               ]
             }),
 
-            // Persona Details Section
+            // 5. Apply / save
             jsxs('div', {
-              className: 'space-y-2 pt-2 border-t border-border/40',
+              className: 'p-3 bg-secondary/15 border border-border/70 rounded space-y-2',
               children: [
+                jsx('div', { className: 'text-xs font-bold text-foreground', children: '5. Apply / save' }),
+                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Save Persona updates the selected pack (or creates a new one). Assign Voice is group-chat TTS only.' }),
                 jsxs('div', {
-                  className: 'grid grid-cols-4 gap-2',
+                  className: 'flex items-center justify-between',
                   children: [
-                    jsxs('div', {
-                      className: 'col-span-1',
+                    jsx('label', {
+                      className: 'text-xs font-semibold text-foreground flex items-center gap-1.5',
                       children: [
-                        jsx('label', { className: 'text-xs font-medium', children: 'Avatar Emoji:' }),
-                        jsx(Input, {
-                          value: avatar,
-                          onChange: (e) => setAvatar(e.target.value),
-                          className: 'text-xs h-8 text-center'
+                        '🤖 Assign Voice to Hermes Bot / Profile',
+                        jsx('span', {
+                          className: 'text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-medium',
+                          children: 'Group chats only — not a default for new chats'
                         })
                       ]
                     }),
-                    jsxs('div', {
-                      className: 'col-span-3',
-                      children: [
-                        jsx('label', { className: 'text-xs font-medium', children: 'Persona Name:' }),
-                        jsx(Input, {
-                          value: name,
-                          onChange: (e) => setName(e.target.value),
-                          placeholder: 'e.g. Jarvis Butler, Storyteller',
-                          className: 'text-xs h-8'
-                        })
-                      ]
+                    botProfiles.length > 0 && selectedBotProfile && jsx('span', {
+                      className: 'text-[11px] text-muted-foreground',
+                      children: `Current: ${(botProfiles.find(b => b.id === selectedBotProfile)?.voice) || 'none'}`
                     })
                   ]
                 }),
                 jsxs('div', {
+                  className: 'flex gap-2 items-center',
                   children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Persona System Prompt / Speaking Style:' }),
-                    jsx(Textarea, {
-                      value: systemPrompt,
-                      onChange: (e) => setSystemPrompt(e.target.value),
-                      placeholder: 'Define how this assistant speaks, vocabulary rules, mannerisms...',
-                      className: 'text-xs min-h-[90px]'
+                    jsx('select', {
+                      value: selectedBotProfile,
+                      onChange: (e) => setSelectedBotProfile(e.target.value),
+                      className: 'flex-1 h-8 rounded border border-border bg-background px-2 text-xs text-foreground',
+                      children: botProfiles.length === 0
+                        ? jsx('option', { value: '', children: 'No profiles detected' })
+                        : botProfiles.map(b =>
+                            jsx('option', {
+                              key: b.id,
+                              value: b.id,
+                              children: `${b.title} (${b.id}) [TTS: ${b.provider || 'none'}]`
+                            })
+                          )
+                    }),
+                    jsx(Button, {
+                      size: 'sm',
+                      onClick: handleAssignVoiceToBot,
+                      disabled: isAssigning || !selectedVoice || !selectedBotProfile,
+                      className: 'text-xs h-8 px-4 shrink-0 font-medium',
+                      children: isAssigning ? 'Applying...' : '🚀 Apply Voice to Bot'
                     })
                   ]
                 })
@@ -1557,7 +1699,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
               size: 'sm',
               onClick: handleSavePersona,
               className: 'bg-primary text-primary-foreground',
-              children: '💾 Save Persona'
+              children: editingPackId ? '💾 Update Persona' : '💾 Save Persona'
             })
           ]
         })

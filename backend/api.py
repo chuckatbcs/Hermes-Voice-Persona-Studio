@@ -51,6 +51,19 @@ class CreatePersonaRequest(BaseModel):
     tags: Optional[List[str]] = None
 
 
+class UpdatePersonaRequest(BaseModel):
+    name: Optional[str] = None
+    avatar: Optional[str] = None
+    system_prompt: Optional[str] = None
+    provider: Optional[str] = None
+    voice_id: Optional[str] = None
+    voice_name: Optional[str] = None
+    speed: Optional[float] = None
+    temperature: Optional[float] = None
+    character_strength: Optional[Any] = None
+    tags: Optional[List[str]] = None
+
+
 class AssignVoiceRequest(BaseModel):
     provider: str
     voice_id: str
@@ -312,7 +325,39 @@ def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
         tags=req.tags or [],
     )
     saved = storage.save_persona(bundle)
-    return {"ok": True, "persona": saved.to_dict()}
+    return {"ok": True, "created": True, "persona": saved.to_dict()}
+
+
+@router.put("/personas/{persona_id}")
+def update_persona(persona_id: str, req: UpdatePersonaRequest) -> Dict[str, Any]:
+    """Update an existing pack in place (Character strength, prompt, voice)."""
+    existing = storage.get_persona(persona_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Persona '{persona_id}' not found")
+    if req.name is not None and str(req.name).strip():
+        existing.name = str(req.name).strip()
+    if req.avatar is not None:
+        existing.avatar = req.avatar or existing.avatar
+    if req.system_prompt is not None:
+        existing.system_prompt = req.system_prompt
+    if req.provider is not None:
+        existing.provider = req.provider
+    if req.voice_id is not None:
+        existing.voice_id = req.voice_id
+    if req.voice_name is not None:
+        existing.voice_name = req.voice_name
+    if req.speed is not None:
+        existing.speed = float(req.speed)
+    if req.temperature is not None:
+        existing.temperature = float(req.temperature)
+    if req.character_strength is not None:
+        existing.character_strength = persona_sync.character_strength_percent(req.character_strength)
+    if req.tags is not None:
+        existing.tags = req.tags
+    saved = storage.save_persona(existing)
+    data = saved.to_dict()
+    data["character_strength"] = persona_sync.character_strength_percent(saved.character_strength)
+    return {"ok": True, "updated": True, "persona": data}
 
 
 @router.delete("/personas/{persona_id}")

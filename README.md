@@ -90,6 +90,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
 3. Picking a **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. **Character strength (0–100%)** on the pack: **0%** = profile SOUL / AGENTS.md only (no style overlay); **100%** = the character **eclipses** SOUL for this session; mid values blend. This is **not** TTS Temperature / Expressiveness. The titlebar lists only packs with a non-stub prompt and a usable cloned voice; voice-only clones stay in Studio. Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only.
+4. **Studio workflow (top → bottom):** pick/create a pack (name + avatar hydrate from the selected persona) → Personality / Character strength (LLM) → Voice (TTS) → Clone → Save/Update. Selecting Cartman fills the form; **Save Persona** **updates** that pack (`PUT /personas/{id}`) including Character strength 100%. Empty name uses the selected pack name. Studio stays open after save. **New** still **POST**s a new pack.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
@@ -139,7 +140,8 @@ The companion service runs at `http://127.0.0.1:17495`.
 | `/api/studio/voices/{provider}/{id}/resample` | `POST` | Update reference audio for existing voice |
 | `/api/studio/profiles` | `GET` | List all Hermes bot profiles with active voices |
 | `/api/studio/profiles/{id}/assign-voice` | `POST` | 1-click assign a voice to a bot profile |
-| `/api/studio/personas` | `GET` / `POST` | Manage portable persona bundles (`?listable=true` = complete packs only) |
+| `/api/studio/personas` | `GET` / `POST` | List or create portable persona bundles (`?listable=true` = complete packs only) |
+| `/api/studio/personas/{id}` | `PUT` | Update an existing pack (prompt, voice, **character_strength** 0–100) |
 
 ---
 

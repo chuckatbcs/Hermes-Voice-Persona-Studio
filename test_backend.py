@@ -76,6 +76,45 @@ class TestPersonaStorage(IsolatedHermesHomeTest):
             55,
         )
 
+    def test_put_updates_existing_pack_character_strength(self):
+        from backend import api as api_mod
+        from fastapi import HTTPException
+
+        previous = api_mod.storage
+        api_mod.storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        try:
+            api_mod.storage.save_persona(
+                PersonaBundle(
+                    id="cartman",
+                    name="Eric Cartman",
+                    avatar="🧢",
+                    system_prompt="Aggressive impatient South Park snark while doing the job.",
+                    provider="voicebox",
+                    voice_id="c9da87b0-19be-49c4-ab44-01cb7943f5c4",
+                    voice_name="Cartman",
+                    character_strength=25,
+                )
+            )
+            result = api_mod.update_persona(
+                "cartman",
+                api_mod.UpdatePersonaRequest(character_strength=100),
+            )
+            self.assertTrue(result["updated"])
+            self.assertEqual(result["persona"]["id"], "cartman")
+            self.assertEqual(result["persona"]["character_strength"], 100)
+            self.assertEqual(result["persona"]["name"], "Eric Cartman")
+            loaded = api_mod.storage.get_persona("cartman")
+            self.assertEqual(loaded.character_strength, 100)
+            self.assertEqual(loaded.system_prompt, "Aggressive impatient South Park snark while doing the job.")
+            with self.assertRaises(HTTPException) as raised:
+                api_mod.update_persona(
+                    "missing-pack",
+                    api_mod.UpdatePersonaRequest(character_strength=50),
+                )
+            self.assertEqual(raised.exception.status_code, 404)
+        finally:
+            api_mod.storage = previous
+
     def test_storage_skips_dotfiles(self):
         root = self.home / "personas"
         storage = PersonaStorage(root_dir=str(root))
@@ -1343,6 +1382,20 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("complete packs", self.src)
         self.assertIn("Character strength (LLM) — 0% = profile soul only", self.src)
         self.assertIn("Temperature / Expressiveness (TTS only)", self.src)
+        self.assertIn("1. Pick / create pack", self.src)
+        self.assertIn("2. Personality (LLM)", self.src)
+        self.assertIn("3. Voice (TTS)", self.src)
+        self.assertIn("4. Clone new voice", self.src)
+        self.assertIn("5. Apply / save", self.src)
+        self.assertIn("applyPackToForm", self.src)
+        self.assertIn("hydrateFormFromPack", self.src)
+        start = self.src.index("const handleSavePersona = async () => {")
+        end = self.src.index("const handleAssignVoiceToBot")
+        save = self.src[start:end]
+        self.assertIn("personaSaveRequest", save)
+        self.assertIn("plan.method", save)
+        self.assertNotIn("onOpenChange(false)", save)
+        self.assertNotIn("Please enter a name for the Persona.", save.split("plan.error")[0])
 
     def test_profile_switch_to_other_bot_is_not_user_new_chat(self):
         data = self._run_js(
@@ -1402,6 +1455,76 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertTrue(data["complete"])
         self.assertFalse(data["stub"])
         self.assertEqual(data["strength"], 80)
+
+    def test_studio_hydrate_and_save_update_plan(self):
+        helpers = self.src[self.src.index("function isGenericVoiceDescription") :]
+        helpers = helpers[: helpers.index("// STUDIO_FORM_END") + len("// STUDIO_FORM_END")]
+        data = self._run_js_helpers(
+            helpers,
+            """
+            const pack = {
+              id: 'cartman',
+              name: 'Eric Cartman',
+              avatar: '🧢',
+              system_prompt: 'Aggressive impatient South Park snark.',
+              provider: 'voicebox',
+              voice_id: 'c9da87b0-19be-49c4-ab44-01cb7943f5c4',
+              speed: 1.05,
+              temperature: 0.8,
+              character_strength: 25
+            };
+            const hydrated = hydrateFormFromPack(pack);
+            const unnamed = personaSaveRequest({
+              editingId: 'cartman',
+              name: '',
+              selectedPack: pack,
+              avatar: '🧢',
+              systemPrompt: pack.system_prompt,
+              provider: 'voicebox',
+              selectedVoice: pack.voice_id,
+              voiceName: 'Cartman',
+              speed: 1.05,
+              temperature: 0.8,
+              characterStrength: 100
+            });
+            const created = personaSaveRequest({
+              editingId: '',
+              name: 'New Pal',
+              selectedPack: null,
+              avatar: '🤖',
+              systemPrompt: 'hello',
+              provider: 'fish_audio',
+              selectedVoice: 'abc',
+              voiceName: 'abc',
+              speed: 1,
+              temperature: 0.7,
+              characterStrength: 40
+            });
+            const missing = personaSaveRequest({
+              editingId: '',
+              name: '',
+              selectedPack: null,
+              avatar: '🤖',
+              systemPrompt: '',
+              provider: 'voicebox',
+              selectedVoice: '',
+              speed: 1,
+              temperature: 0.7,
+              characterStrength: 25
+            });
+            console.log(JSON.stringify({ hydrated, unnamed, created, missing }));
+            """,
+        )
+        self.assertEqual(data["hydrated"]["name"], "Eric Cartman")
+        self.assertEqual(data["hydrated"]["characterStrength"], 25)
+        self.assertEqual(data["hydrated"]["selectedVoice"], "c9da87b0-19be-49c4-ab44-01cb7943f5c4")
+        self.assertEqual(data["unnamed"]["method"], "PUT")
+        self.assertEqual(data["unnamed"]["url"], "/personas/cartman")
+        self.assertEqual(data["unnamed"]["body"]["name"], "Eric Cartman")
+        self.assertEqual(data["unnamed"]["body"]["character_strength"], 100)
+        self.assertEqual(data["created"]["method"], "POST")
+        self.assertEqual(data["created"]["url"], "/personas")
+        self.assertIn("error", data["missing"])
 
     def _run_js_helpers(self, helpers: str, body: str):
         import json
