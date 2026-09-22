@@ -109,6 +109,7 @@ function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
   // No local state — receives from parent
 
   const onSelectPersona = async (id) => {
+    console.log('[PersonaStudio] Selected:', id);
     if (id === '__open_studio__') {
       openStudio();
       return;
@@ -117,19 +118,51 @@ function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
     const chosen = personas.find(p => p.id === id);
     if (!chosen) return;
 
+    console.log('[PersonaStudio] Applying persona:', chosen.name);
+    console.log('[PersonaStudio] Session:', host.state.focusedSessionId.get(), host.state.focusedSessionProfile.get());
     // Apply persona by injecting its system prompt as a user message
-    const sessionId = host.state.focusedSessionId;
+    const sessionId = host.state.focusedSessionId.get();
     if (sessionId) {
       try {
         const personaMessage = `[System: Switching to persona "${chosen.name}". From now on, adopt this persona and follow these instructions: ${chosen.system_prompt}]`;
-        await host.requestProfile(
-          { connectionId: host.state.focusedSessionOwner?.connectionId || null, profile: host.state.focusedSessionProfile },
+        console.log('[PersonaStudio] Submitting to session:', sessionId);
+        const result = await host.requestProfile(
+          { connectionId: host.state.focusedSessionOwner.get()?.connectionId || null, profile: host.state.focusedSessionProfile.get() },
           'prompt.submit',
           { session_id: sessionId, text: personaMessage }
         );
+        console.log('[PersonaStudio] Result:', result);
+
+        // Also assign the voice to the active profile
+        if (chosen.voice_id && chosen.voice_id !== 'default') {
+          try {
+            const assignRes = await fetch(`${API_BASE}/profiles/${host.state.focusedSessionProfile.get()}/assign-voice`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                provider: chosen.provider,
+                voice_id: chosen.voice_id,
+                voice_name: chosen.voice_name
+              })
+            });
+            if (assignRes.ok) {
+              console.log('[PersonaStudio] Voice assigned:', chosen.voice_name);
+              host.toast({
+                title: `${chosen.avatar} Voice Assigned`,
+                message: `${chosen.voice_name} assigned to profile "${host.state.focusedSessionProfile.get()}"`
+              });
+            } else {
+              console.warn('[PersonaStudio] Voice assignment failed');
+            }
+          } catch (e) {
+            console.warn('[PersonaStudio] Voice assignment error:', e);
+          }
+        }
       } catch (e) {
         console.warn('[PersonaStudio] Failed to apply persona:', e);
       }
+    } else {
+      console.warn('[PersonaStudio] No focused session - persona not applied');
     }
 
     host.toast({
