@@ -94,7 +94,7 @@ function TitlebarPersonaPicker({ openStudio }) {
     return () => clearInterval(interval);
   }, [refreshPersonas]);
 
-  const onSelectPersona = (id) => {
+  const onSelectPersona = async (id) => {
     if (id === '__open_studio__') {
       openStudio();
       return;
@@ -102,6 +102,21 @@ function TitlebarPersonaPicker({ openStudio }) {
     setActiveId(id);
     const chosen = personas.find(p => p.id === id);
     if (!chosen) return;
+
+    // Apply persona by injecting its system prompt as a user message
+    const sessionId = host.state.focusedSessionId;
+    if (sessionId) {
+      try {
+        const personaMessage = `[System: Switching to persona "${chosen.name}". From now on, adopt this persona and follow these instructions: ${chosen.system_prompt}]`;
+        await host.requestProfile(
+          { connectionId: host.state.focusedSessionOwner?.connectionId || null, profile: host.state.focusedSessionProfile },
+          'prompt.submit',
+          { session_id: sessionId, text: personaMessage }
+        );
+      } catch (e) {
+        console.warn('[PersonaStudio] Failed to apply persona:', e);
+      }
+    }
 
     host.toast({
       title: `${chosen.avatar} Persona Switched`,
