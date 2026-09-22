@@ -89,7 +89,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 ### 1. Launching the Studio
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **persona** overlays **speaking style + cloned TTS** on **this chat only**. The selected Hermes profile’s SOUL / job / skills stay primary (Mechanic + Cartman = mechanic that *speaks like* Cartman). New chats return to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only. Local **Voicebox / Qwen** remains an explicit `Name · Voicebox` choice. Sending the first prompt must **not** open a second blank chat (the plugin ignores Hermes session-id persist and only restores stock when you click New Chat).
+3. Picking a **persona** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. The next reply picks up the ephemeral overlay. The selected Hermes profile’s SOUL / job / skills stay primary (Mechanic + Cartman = mechanic that *speaks like* Cartman). **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only. Local **Voicebox / Qwen** remains an explicit `Name · Voicebox` choice.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
@@ -108,7 +108,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 2. Select your base engine model.
 3. Choose a reference audio sample (`.wav`, `.mp3`, `.m4a`).
 4. Click **`🎙️ Clone Voice & Register`**.
-5. Studio registers the TTS clone **and** writes `~/.hermes/personas/<slug>/` (mannerism overlay from the clone description, not a full “You are {name}…” identity). Use **Save Persona** if you want a custom prompt/avatar; use the titlebar to apply **style + voice** to the **current chat** without replacing the profile’s soul. The next new chat is profile stock again.
+5. Studio registers the TTS clone **and** writes `~/.hermes/personas/<slug>/` (mannerism overlay from the clone description, not a full “You are {name}…” identity). Use **Save Persona** if you want a custom prompt/avatar; use the titlebar to apply **style + voice** to the **current chat** (no new session). **New Chat** returns to profile stock.
 
 ### 5. Managing Duplicates & Re-sampling
 1. Click **`[ ⚙️ Manage ]`** next to the voice selector.

@@ -937,19 +937,13 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIsNone(data["overlayPatch"]["storedId"])
         self.assertEqual(data["overlayPatch"]["sessionId"], "ephemeral-blank")
 
-    def test_reload_after_apply_only_when_session_is_persisted(self):
-        data = self._run_js(
-            """
-            console.log(JSON.stringify({
-              blank: shouldReloadSessionAfterApply(null),
-              empty: shouldReloadSessionAfterApply(''),
-              persisted: shouldReloadSessionAfterApply('stored-abc')
-            }));
-            """
-        )
-        self.assertFalse(data["blank"])
-        self.assertFalse(data["empty"])
-        self.assertTrue(data["persisted"])
+    def test_apply_and_standard_clear_do_not_call_newchat(self):
+        start = self.src.index("const onSelectPersona = async (id) => {")
+        end = self.src.index("const currentLookup = lookupSelection")
+        select = self.src[start:end]
+        self.assertNotIn("startNewChat", select)
+        self.assertNotIn("shouldReloadSessionAfterApply", self.src)
+        self.assertNotIn("host.newChat", select)
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):

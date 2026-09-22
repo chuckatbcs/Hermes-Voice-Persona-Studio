@@ -257,12 +257,11 @@ async function startNewChat(profile) {
  * 1. Reset overlay ONLY on focusedStoredSessionId non-null → null/empty (user New Chat).
  *    Ignore focusedSessionId string churn (first-prompt persist).
  * 2. After that reset, do NOT call host.newChat (user already has the blank chat).
- * 3. applyInProgress stays true across apply + optional one newChat until session
- *    atoms settle (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
- * 4. One host.newChat after apply is still required when the current session is
- *    already persisted: Hermes injects personality overlays at session start, so
- *    config.yaml overlay would not reload mid-thread. Blank drafts skip newChat
- *    (no stored id) so apply does not stack a second empty chat.
+ * 3. applyInProgress stays true across apply until session atoms settle
+ *    (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
+ * 4. Persona/clone apply and Standard Hermes clear do NOT call host.newChat.
+ *    Hermes injects ephemeral personality at API-call time; the next turn in
+ *    this chat picks up the style overlay + cloned TTS.
  */
 const APPLY_GATE_MS = 8000;
 
@@ -274,10 +273,6 @@ function isEmptySessionId(id) {
 
 function isUserNewChatTransition(prevStored, nextStored) {
   return !isEmptySessionId(prevStored) && isEmptySessionId(nextStored);
-}
-
-function shouldReloadSessionAfterApply(storedId) {
-  return !isEmptySessionId(storedId);
 }
 
 function decideSessionWatchTick(overlay, nextSessionId, nextStoredId) {
@@ -527,16 +522,12 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       try {
         const ok = await resetSessionOverlay(profile);
         if (ok) {
-          const storedBeforeReload = focusedStoredSessionId();
-          if (shouldReloadSessionAfterApply(storedBeforeReload)) {
-            await startNewChat(profile);
-          }
           overlayRef.current.active = false;
           overlayRef.current.sessionId = focusedSessionId();
           overlayRef.current.storedId = focusedStoredSessionId();
           host.toast({
             title: '🤖 Standard Hermes',
-            message: `This session uses stock Hermes on "${profile}"`
+            message: `Stock profile soul on "${profile}" — next reply in this chat, no new session`
           });
         } else {
           clearApplyGate(overlayRef.current);
@@ -631,12 +622,6 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       });
       applied = applyRes.ok;
       if (applyRes.ok) {
-        const storedBeforeReload = focusedStoredSessionId();
-        if (shouldReloadSessionAfterApply(storedBeforeReload)) {
-          // Persisted session already cached stock system_prompt; one newChat
-          // reloads overlay. Blank drafts skip this so apply does not stack chats.
-          await startNewChat(profile);
-        }
         overlayRef.current.active = true;
         overlayRef.current.sessionId = focusedSessionId();
         overlayRef.current.storedId = focusedStoredSessionId();
@@ -653,7 +638,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     host.toast({
       title: `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
       message: applied
-        ? `Style + ${ttsLabel} voice overlaid on this profile's soul. Next new chat returns to stock.`
+        ? `Style + ${ttsLabel} voice on this chat — next reply picks it up. New Chat returns to stock.`
         : `Failed to apply speaking persona on "${profile}"`
     });
 

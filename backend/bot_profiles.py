@@ -212,7 +212,7 @@ def set_profile_persona(
             "profile_id": profile_id,
             "persona": "",
             "write_strategy": strategy,
-            "message": f"Personality overlay cleared for profile '{profile_id}' — start a new chat to take effect",
+            "message": f"Personality overlay cleared for profile '{profile_id}' — next reply uses stock profile soul",
         }
 
     personality_value = {
@@ -237,7 +237,7 @@ def set_profile_persona(
         "persona": clean_name,
         "write_strategy": strategy,
         "message": (
-            f"Persona '{persona_name}' set for profile '{profile_id}' — "
-            "start a new chat to take effect"
+            f"Speaking style '{persona_name}' set for profile '{profile_id}' — "
+            "next reply in this chat picks up the overlay"
         ),
     }
