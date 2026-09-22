@@ -192,7 +192,9 @@ def set_profile_persona(
     Studio-managed entries are stored as dicts so ``render_personality_prompt``
     can read ``system_prompt`` and uninstall --purge can identify them.
     Neutral names (none/default/empty) clear the overlay without deleting
-    stored personality definitions.
+    stored personality definitions. Catalog keys are not themselves active —
+    only ``display.personality`` selects them. Session apply overlays
+    ``agent.system_prompt`` separately and restores it on new-chat reset.
     """
     path = cfg_path or config_path_for_profile(profile_id)
     if not path.exists():

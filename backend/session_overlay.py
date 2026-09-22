@@ -10,7 +10,8 @@ cached when a chat starts. Dropdown apply therefore:
 3. Restores the stash on the next user-initiated new session. Unusable stash
    (missing, Voicebox ``default``) falls back to Nous stock TTS:
    ``tts.provider: edge`` + ``tts.edge.voice: en-US-AriaNeural``.
-   Never Voicebox Jarvis, never ``voice: default``, never a Studio clone as stock.
+   Restores ``agent.system_prompt`` to the stashed value or ``''`` — leftover
+   KITT/Cartman text must not survive a new-chat reset.
 
 This module never patches ``~/.hermes/hermes-agent``.
 """
@@ -22,11 +23,12 @@ from typing import Any, Dict, List, Optional
 
 from . import bot_profiles
 from .config_io import get_dotted, load_yaml, snapshot_values, update_config_keys
-from .managed_index import SOURCE_TAG
+from .managed_index import SOURCE_TAG, remember_writes
 from .paths import config_path_for_profile, session_state_path
 
 STASH_KEYS = (
     "display.personality",
+    "agent.system_prompt",
     "tts.provider",
     "tts.edge.voice",
     "tts.providers.fish.voice",
@@ -108,6 +110,11 @@ def _stash_restore_updates(stash: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     Never writes Voicebox ``voice: default``, a Studio clone id as stock, or
     an invented Jarvis UUID. Promax session 20260922_094441_564b69: a
     placeholder Voicebox id made command TTS 404 and play no audio.
+
+    Always restores ``agent.system_prompt`` (empty if none was stashed).
+    Promax mechanic retest: leftover ``You are K.I.T.T....`` in
+    ``agent.system_prompt`` made a "default" session stay KITT after
+    ``display.personality`` was already empty.
     """
     updates: Dict[str, Any] = {}
     if "display.personality" in stash:
@@ -115,6 +122,9 @@ def _stash_restore_updates(stash: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
         updates["display.personality"] = "" if val is None else val
     else:
         updates["display.personality"] = ""
+
+    stashed_prompt = stash.get("agent.system_prompt") if "agent.system_prompt" in stash else None
+    updates["agent.system_prompt"] = "" if stashed_prompt is None else stashed_prompt
 
     provider = str(stash.get("tts.provider") or "").strip().lower()
     edge_voice = stash.get("tts.edge.voice")
@@ -152,10 +162,11 @@ def _stash_restore_updates(stash: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
 
 
 def _clear_studio_personality_selection(cfg_path: Path) -> bool:
-    """Clear a Studio-tagged display.personality without assuming TTS.
+    """Clear a Studio-tagged display.personality. Catalog dicts stay put.
 
-    TTS is handled separately: stash restore, or Edge stock when there is
-    no usable stash. Never invent Voicebox Jarvis as stock.
+    ``agent.personalities.<name>`` entries are not themselves active; only
+    ``display.personality`` (and ``agent.system_prompt`` for this session)
+    select them.
     """
     if not cfg_path.exists():
         return False
@@ -167,6 +178,34 @@ def _clear_studio_personality_selection(cfg_path: Path) -> bool:
     if isinstance(personality, dict) and personality.get("source") == SOURCE_TAG:
         update_config_keys(cfg_path, {"display.personality": ""})
         return True
+    return False
+
+
+def _stock_system_prompt_update() -> Dict[str, Any]:
+    return {"agent.system_prompt": ""}
+
+
+def _clear_studio_injected_system_prompt(cfg_path: Path) -> bool:
+    """Clear agent.system_prompt when it matches a Studio-tagged catalog prompt.
+
+    Catalog ``agent.personalities.*`` dicts are left in place (not active).
+    """
+    if not cfg_path.exists():
+        return False
+    cfg = load_yaml(cfg_path)
+    prompt = str(get_dotted(cfg, "agent.system_prompt") or "").strip()
+    if not prompt:
+        return False
+    personalities = get_dotted(cfg, "agent.personalities") or {}
+    if not isinstance(personalities, dict):
+        return False
+    for val in personalities.values():
+        if not isinstance(val, dict) or val.get("source") != SOURCE_TAG:
+            continue
+        stored = str(val.get("system_prompt") or "").strip()
+        if stored and stored == prompt:
+            update_config_keys(cfg_path, _stock_system_prompt_update())
+            return True
     return False
 
 
@@ -202,6 +241,8 @@ def apply_session_overlay(
         persona_prompt,
         cfg_path=path,
     )
+    remember_writes(profile_id, path, ["agent.system_prompt"])
+    update_config_keys(path, {"agent.system_prompt": persona_prompt or ""})
     voice_result = None
     if voice_id and voice_id != "default":
         voice_result = bot_profiles.assign_voice_to_profile(
@@ -254,11 +295,12 @@ def reset_session_overlay(
             restored_keys = list(updates.keys())
     elif path.exists():
         leftover_cleared = _clear_studio_personality_selection(path)
+        leftover_cleared = _clear_studio_injected_system_prompt(path) or leftover_cleared
         cfg = load_yaml(path)
         stock = _hermes_stock_tts_updates(cfg)
-        if stock:
-            update_config_keys(path, stock)
-            restored_keys = list(stock.keys())
+        stock.update(_stock_system_prompt_update())
+        update_config_keys(path, stock)
+        restored_keys = list(stock.keys())
 
     if profile_id in (state.get("profiles") or {}):
         del state["profiles"][profile_id]
@@ -296,6 +338,7 @@ def reset_all_session_overlays(*, state_path: Optional[Path] = None) -> Dict[str
             continue
         cfg_path = config_path_for_profile(pid)
         leftover_cleared = _clear_studio_personality_selection(cfg_path)
+        leftover_cleared = _clear_studio_injected_system_prompt(cfg_path) or leftover_cleared
         placeholder_fix: Dict[str, Any] = {}
         if cfg_path.exists():
             cfg = load_yaml(cfg_path)

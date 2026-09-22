@@ -20,19 +20,19 @@ A **speaking persona** is three things bound together:
 
 | Surface | Role |
 |---|---|
-| **New chat / new session** | Always **stock Hermes**: empty `display.personality` and Nous default TTS **`edge` / `en-US-AriaNeural`** (or the stashed pre-apply TTS if a dropdown apply stashed it). Must not inherit Studio overlays, Voicebox Jarvis, Fish clones, or `voice: default`. |
+| **New chat / new session** | Always **stock Hermes**: empty `display.personality`, **empty `agent.system_prompt`** (or the stashed pre-apply prompt), and Nous default TTS **`edge` / `en-US-AriaNeural`**. Must not inherit Studio overlays, leftover KITT/Cartman `agent.system_prompt`, Voicebox Jarvis, Fish clones, or `voice: default`. |
 | **Titlebar dropdown** | Assign/apply a designed speaking persona (prompt + voice) to **this chat session only**. Not a permanent default for every future session. |
 | **Persona Studio modal** | Design: create, clone, edit voices and persona bundles. Does not auto-apply on startup or companion refresh. |
 | **Studio “Apply Voice to Bot”** | Group-chat bot TTS bind (profile TTS keys). Not a titlebar session default. |
 
 Hermes Desktop exposes `host.newChat`, `host.state.focusedSessionId` / `focusedStoredSessionId`, and config-file personality overlays. There is **no session-scoped personality or TTS API**. Overlay is therefore config-file + stash/restore:
 
-1. Dropdown apply **stashes** pre-apply `display.personality` + TTS (`tts.provider`, `tts.edge.voice`, Fish/Voicebox keys).
-2. Writes overlay so *this* chat can speak as the chosen persona (`host.newChat` refreshes Hermes prompt cache for that apply). Fish-prefer runs **only** on this explicit pick.
-3. The next **user-initiated** new chat restores the stash. If there is no usable stash (missing, `voice: default`, non-UUID Voicebox), restore **Hermes Edge stock** (`tts.provider: edge`, `tts.edge.voice: en-US-AriaNeural`) — never Voicebox Jarvis and never a Studio clone as stock.
-4. Plugin startup calls `POST /session/reset-all` so a leftover overlay cannot stick. It does **not** auto-apply any Studio persona. A leftover Voicebox `voice: default` is replaced with Edge stock (Promax session `20260922_094441_564b69` was silent TTS).
+1. Dropdown apply **stashes** pre-apply `display.personality`, **`agent.system_prompt`**, and TTS (`tts.provider`, `tts.edge.voice`, Fish/Voicebox keys).
+2. Writes overlay so *this* chat can speak as the chosen persona: `display.personality` + session `agent.system_prompt` + Fish-prefer TTS. Catalog `agent.personalities.<name>` dicts are **not** themselves active. Fish-prefer runs **only** on this explicit pick.
+3. The next **user-initiated** new chat restores the stash, including `agent.system_prompt` (or `''` if none). If there is no usable TTS stash, restore **Hermes Edge stock**. Never leave KITT/Cartman in `agent.system_prompt`.
+4. Plugin startup calls `POST /session/reset-all` so a leftover overlay cannot stick. Studio-tagged catalog entries may remain; they do nothing unless `display.personality` selects them.
 
-**Stock Hermes TTS is Edge, not Jarvis / Voicebox / Fish.** Cited from Nous Hermes `hermes_cli/config_defaults.py` and `tools/tts_tool.py`: `DEFAULT_PROVIDER = "edge"`, clean-install `tts.provider: edge`, `tts.edge.voice: en-US-AriaNeural`. Voicebox, Fish, Jarvis, and Cartman are optional add-ons. Mechanic restoring Voicebox Jarvis from an old backup was incorrect; Charles set Promax default+mechanic to Edge / AriaNeural.
+**Sticky `agent.system_prompt` (Promax mechanic retest):** Charles opened a “default” session with empty `display.personality` and Edge AriaNeural and still got KITT (“I am K.I.T.T. … Knight Rider”). `~/.hermes/profiles/mechanic/config.yaml` still had `agent.system_prompt: You are K.I.T.T. from Knight Rider...`. Hermes injects that field every session, so clearing only the personality overlay is insufficient. Studio-tagged `agent.personalities.kitt` was catalog-only (not a selector). Session apply now stashes/restores `agent.system_prompt`; stock/reset writes the stashed value or `''`. Memories/`USER.md` “Active profile: kitt” can still bias the model and is out of band for this PR (Mechanic scrubbed those on Promax).
 
 **Hard boundary:** this plugin must stay *outside* `~/.hermes/hermes-agent`. Nous Hermes updates remain a clean checkout. Studio only reads/writes:
 
@@ -103,7 +103,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Action | Disk | Hermes session |
 |---|---|---|
-| Titlebar pick persona | Stash stock personality + TTS into `.studio-session.json`; overlay `display.personality` + Fish-prefer TTS on the profile config | `host.newChat(profile)` so **this** chat picks up Cartman/Jarvis/KITT. Next **user** new chat restores stash → stock Hermes |
+| Titlebar pick persona | Stash `display.personality` + **`agent.system_prompt`** + TTS; overlay personality + session system_prompt + Fish-prefer TTS. Catalog dicts are not active by themselves | `host.newChat` so **this** chat picks up Cartman/Jarvis/KITT. Next **user** new chat restores stash — system_prompt must not stay KITT/Cartman |
 | Titlebar pick `Name · Fish` clone | Same session overlay; explicit Fish assign | Same apply `newChat`; not sticky |
 | Titlebar pick `Name · Voicebox` clone | Same session overlay; explicit local GPU (slow path; user-forced) | Same apply `newChat`; not sticky |
 | Titlebar Standard Hermes | Restore stash, or Edge stock if no usable stash. Never `voicebox.voice: default` | `newChat` after restore |
@@ -153,8 +153,8 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 ### Session vs sticky (amended intent 2026-09-22) — **do this first**
 
 1. **New chat → stock Hermes.** Open Hermes Desktop (or click New Chat). Send a short line.
-   - Expect default Hermes **text** (no Cartman/KITT/Jarvis overlay).
-   - Expect **Edge TTS** `en-US-AriaNeural` (Nous clean-install default). Not Voicebox Jarvis, not Fish, not `voice: default`. Audio should play (~0.9s Edge smoke on Promax).
+   - Expect default Hermes **text** (no Cartman/KITT/Jarvis overlay, no leftover `agent.system_prompt`).
+   - Expect **Edge TTS** `en-US-AriaNeural`. Audio should play.
 2. **Dropdown apply is this session only.** Pick the **persona** row for Cartman (not `Cartman · Voicebox`).
    - Expect toast that prompt + **Fish** applied to **this chat**, and that the next new chat returns to stock Hermes.
    - This session should speak as Cartman. If a Fish twin exists (`Hermes eric_cartman` preferred over `Hermes cartman`), audio should land in about ≤5 seconds (Promax Fish baseline 2.5–3.4s).
@@ -185,7 +185,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 - [ ] Titlebar fetches **Fish + Voicebox** voices (not `provider=voicebox` only)
 - [ ] Persona apply prefers a Fish name-twin; `Name · Voicebox` remains an explicit local choice
 - [ ] `Eric Cartman` resolves `Hermes eric_cartman` over `Hermes cartman`; Jarvis/KITT match `Hermes jarvis` / `Hermes kitt`
-- [ ] New chat is stock Hermes **Edge / en-US-AriaNeural**; dropdown apply is session-scoped; no auto-apply on startup
+- [ ] New chat is stock Hermes **Edge / en-US-AriaNeural** with **empty `agent.system_prompt`**; dropdown apply is session-scoped; no auto-apply on startup
 - [ ] Session reset never writes Voicebox `voice: default` or a Studio clone as stock
 - [ ] Clone API creates/updates a persona bundle
 - [ ] `POST /api/studio/sync-from-voices` is idempotent and does not downgrade Fish → Voicebox
@@ -242,3 +242,5 @@ When `~/.hermes/hermes-agent/utils.py::atomic_roundtrip_yaml_update` cannot be i
 **Session overlay residual:** Hermes has no true session-scoped personality/TTS API. Apply still writes profile `config.yaml` for the duration of one chat, then restores. If the plugin is not loaded, a user-initiated New Chat will not restore the stash until the plugin mounts (startup `reset-all`). Opening a stored history session restores config without an extra `newChat`.
 
 **Silent TTS (Promax `20260922_094441_564b69`):** stock/reset wrote Voicebox `voice: default`. Command TTS used `--voice default`, 404'd a stale process-global active-voice UUID (`151b6710-8f59-4366-9410-0b3044ded982`), and played no audio. Reset must never emit that placeholder; first-run stock is Edge AriaNeural, not Voicebox Jarvis.
+
+**False “default session is KITT” (Promax mechanic retest):** empty `display.personality` + Edge Aria was not enough. Leftover `agent.system_prompt` (KITT) is injected every session. Reset must stash/restore that key (or `''`). Do not treat `agent.personalities.kitt` as active. Memory files mentioning “Active profile: kitt” can still bias replies until scrubbed outside this plugin.

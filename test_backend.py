@@ -508,6 +508,7 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(apply["scope"], "session")
         after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(after["display"]["personality"], "eric_cartman")
+        self.assertEqual(after["agent"]["system_prompt"], "You are Eric Cartman.")
         self.assertEqual(after["tts"]["provider"], "fish")
         self.assertEqual(after["tts"]["providers"]["fish"]["voice"], "hermes_eric_cartman")
         self.assertTrue(session_overlay.overlay_status("default")["active"])
@@ -516,10 +517,14 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertTrue(reset["restored"])
         restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(restored["display"]["personality"], "")
+        self.assertEqual(restored["agent"]["system_prompt"], "")
         self.assertEqual(restored["tts"]["provider"], "fish")
         self.assertEqual(restored["tts"]["providers"]["fish"]["voice"], "mechanic_default")
         self.assertEqual(restored["model"], "keep-me")
         self.assertFalse(session_overlay.overlay_status("default")["active"])
+        # Catalog entry is not itself active
+        kitt_or_cartman = ((restored.get("agent") or {}).get("personalities") or {}).get("eric_cartman")
+        self.assertIsInstance(kitt_or_cartman, dict)
 
     def test_second_apply_does_not_overwrite_stash(self):
         from backend import session_overlay
@@ -586,6 +591,7 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(data["display"]["personality"], "")
         self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "mechanic_default")
+        self.assertEqual((data.get("agent") or {}).get("system_prompt") or "", "")
 
     def test_reset_does_not_write_voicebox_default(self):
         from backend import session_overlay
@@ -654,6 +660,65 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
             bot_profiles.assign_voice_to_profile(
                 "default", "voicebox", "default", "Default", cfg_path=cfg
             )
+
+    def test_reset_restores_stashed_system_prompt_or_empty(self):
+        from backend import session_overlay
+
+        cfg = self.home / "config.yaml"
+        cfg.write_text(
+            "agent:\n"
+            "  system_prompt: You are a custom mechanic helper.\n"
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: ''\n",
+            encoding="utf-8",
+        )
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="KITT",
+            persona_prompt="You are K.I.T.T. from Knight Rider.",
+            provider="fish_audio",
+            voice_id="kitt-id",
+            voice_name="Hermes kitt",
+            cfg_path=cfg,
+        )
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(after["agent"]["system_prompt"], "You are K.I.T.T. from Knight Rider.")
+        self.assertEqual(after["display"]["personality"], "kitt")
+        session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(restored["display"]["personality"], "")
+        self.assertEqual(restored["agent"]["system_prompt"], "You are a custom mechanic helper.")
+        self.assertEqual(restored["agent"]["personalities"]["kitt"]["source"], "hermes-personastudio")
+
+    def test_leftover_kitt_system_prompt_cleared_without_stash(self):
+        from backend import session_overlay
+
+        cfg = self.home / "config.yaml"
+        cfg.write_text(
+            "agent:\n"
+            "  system_prompt: You are K.I.T.T. from Knight Rider...\n"
+            "  personalities:\n"
+            "    kitt:\n"
+            "      system_prompt: You are K.I.T.T. from Knight Rider...\n"
+            "      source: hermes-personastudio\n"
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: ''\n",
+            encoding="utf-8",
+        )
+        session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(data["display"]["personality"], "")
+        self.assertEqual(data["agent"]["system_prompt"], "")
+        self.assertEqual(data["agent"]["personalities"]["kitt"]["source"], "hermes-personastudio")
+        self.assertEqual(data["tts"]["provider"], "edge")
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):
