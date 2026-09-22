@@ -1381,6 +1381,7 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("character_strength", select)
         self.assertIn("refreshLiveSessionPersonality", select)
         self.assertIn("config.set", self.src)
+        self.assertIn("requestProfile", self.src)
         self.assertIn("host.request", self.src)
         self.assertNotIn("🎙️ CLONES", self.src)
         self.assertIn("complete packs", self.src)
@@ -1549,27 +1550,56 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         data = self._run_js_helpers(
             slug + "\n" + helpers,
             """
-            const calls = [];
-            const hostApi = { request: (method, params) => { calls.push({ method, params }); return Promise.resolve({}); } };
-            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', 'sess-runtime-1', hostApi);
-            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', 'sess-runtime-1', hostApi);
-            const cleared = refreshLiveSessionPersonalityPlan('none', 'sess-runtime-1', hostApi);
-            const draft = refreshLiveSessionPersonalityPlan('eric_cartman', null, hostApi);
-            const noRpc = refreshLiveSessionPersonalityPlan('eric_cartman', 'sess-runtime-1', {});
-            console.log(JSON.stringify({ apply, fromName, cleared, draft, noRpc }));
+            const state = {
+              focusedSessionId: 'sess-runtime-1',
+              focusedSessionOwner: { profile: 'critic' },
+              focusedSessionProfile: 'default'
+            };
+            const hostApi = {
+              requestProfile: () => {},
+              request: () => {}
+            };
+            const apply = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, state, 'default');
+            const fromName = refreshLiveSessionPersonalityPlan('Eric Cartman', hostApi, state, 'default');
+            const cleared = refreshLiveSessionPersonalityPlan('none', hostApi, state, 'default');
+            const fallbackRequest = refreshLiveSessionPersonalityPlan(
+              'eric_cartman',
+              { request: () => {} },
+              { activeSessionId: 'sess-active-2', focusedSessionProfile: 'mechanic' },
+              'default'
+            );
+            const draft = refreshLiveSessionPersonalityPlan('eric_cartman', hostApi, {}, 'critic');
+            const noRpc = refreshLiveSessionPersonalityPlan('eric_cartman', {}, state, 'critic');
+            const liveOk = interpretLiveSessionRefreshResult({ ok: true, info: { applied: true } });
+            const bareSuccess = interpretLiveSessionRefreshResult({ ok: true });
+            const historyOnly = interpretLiveSessionRefreshResult({ ok: true, history_reset: true });
+            console.log(JSON.stringify({
+              apply, fromName, cleared, fallbackRequest, draft, noRpc, liveOk, bareSuccess, historyOnly
+            }));
             """,
         )
         self.assertTrue(data["apply"]["attempted"])
+        self.assertEqual(data["apply"]["via"], "requestProfile")
+        self.assertEqual(data["apply"]["profile"], "critic")
         self.assertEqual(data["apply"]["payload"]["method"], "config.set")
+        self.assertEqual(data["apply"]["payload"]["profile"], "critic")
         self.assertEqual(data["apply"]["payload"]["params"]["key"], "personality")
         self.assertEqual(data["apply"]["payload"]["params"]["value"], "eric_cartman")
         self.assertEqual(data["apply"]["payload"]["params"]["session_id"], "sess-runtime-1")
         self.assertEqual(data["fromName"]["payload"]["params"]["value"], "eric_cartman")
         self.assertEqual(data["cleared"]["payload"]["params"]["value"], "none")
+        self.assertEqual(data["fallbackRequest"]["via"], "request")
+        self.assertEqual(data["fallbackRequest"]["payload"]["params"]["session_id"], "sess-active-2")
+        self.assertEqual(data["fallbackRequest"]["payload"]["profile"], "mechanic")
         self.assertEqual(data["draft"]["skipped"], "no-session")
+        self.assertFalse(data["draft"]["ok"])
         self.assertFalse(data["draft"]["attempted"])
         self.assertEqual(data["noRpc"]["skipped"], "no-request")
-        self.assertFalse(data["noRpc"]["attempted"])
+        self.assertFalse(data["noRpc"]["ok"])
+        self.assertTrue(data["liveOk"]["ok"])
+        self.assertFalse(data["bareSuccess"]["ok"])
+        self.assertFalse(data["historyOnly"]["ok"])
+        self.assertIn("history_reset", data["historyOnly"]["error"])
 
     def _run_js_helpers(self, helpers: str, body: str):
         import json

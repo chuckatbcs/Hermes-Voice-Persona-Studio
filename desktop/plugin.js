@@ -300,20 +300,72 @@ function catalogPersonalityKey(value) {
   return key;
 }
 
-function refreshLiveSessionPersonalityPlan(personaKey, sessionId, hostApi) {
-  const sid = sessionId == null ? '' : String(sessionId).trim();
+function readStateField(state, key) {
+  try {
+    const raw = state && state[key];
+    if (raw && typeof raw.get === 'function') return raw.get();
+    return raw == null ? null : raw;
+  } catch (_) {
+    return null;
+  }
+}
+
+function resolveLiveSessionId(state) {
+  const focused = readStateField(state, 'focusedSessionId');
+  if (focused) return String(focused).trim();
+  const active = readStateField(state, 'activeSessionId');
+  if (active) return String(active).trim();
+  return '';
+}
+
+function resolveLiveSessionProfile(state, fallbackProfile) {
+  const owner = readStateField(state, 'focusedSessionOwner');
+  if (owner && typeof owner === 'object') {
+    const fromOwner = owner.profile || owner.profile_id || '';
+    if (fromOwner) return String(fromOwner).trim();
+  }
+  if (typeof owner === 'string' && owner.trim()) return owner.trim();
+  const focused = readStateField(state, 'focusedSessionProfile');
+  if (focused) return String(focused).trim();
+  if (fallbackProfile) return String(fallbackProfile).trim();
+  return '';
+}
+
+function interpretLiveSessionRefreshResult(result) {
+  if (result && result.info != null) {
+    return { ok: true, attempted: true, skipped: '' };
+  }
+  return {
+    ok: false,
+    attempted: true,
+    skipped: '',
+    error: result && result.history_reset != null
+      ? 'history_reset without live info'
+      : 'gateway returned no live apply info'
+  };
+}
+
+function refreshLiveSessionPersonalityPlan(personaKey, hostApi, state, fallbackProfile) {
+  const sid = resolveLiveSessionId(state);
+  const profile = resolveLiveSessionProfile(state, fallbackProfile);
   if (!sid) {
-    return { ok: true, attempted: false, skipped: 'no-session', payload: null };
+    return { ok: false, attempted: false, skipped: 'no-session', payload: null, via: '', profile: profile };
   }
-  if (!hostApi || typeof hostApi.request !== 'function') {
-    return { ok: true, attempted: false, skipped: 'no-request', payload: null };
+  const canProfile = !!profile && hostApi && typeof hostApi.requestProfile === 'function';
+  const canRequest = hostApi && typeof hostApi.request === 'function';
+  if (!canProfile && !canRequest) {
+    return { ok: false, attempted: false, skipped: 'no-request', payload: null, via: '', profile: profile };
   }
+  const via = canProfile ? 'requestProfile' : 'request';
   return {
     ok: true,
     attempted: true,
     skipped: '',
+    via: via,
+    profile: profile,
     payload: {
       method: 'config.set',
+      profile: profile,
       params: {
         key: 'personality',
         value: catalogPersonalityKey(personaKey),
@@ -325,11 +377,16 @@ function refreshLiveSessionPersonalityPlan(personaKey, sessionId, hostApi) {
 
 async function refreshLiveSessionPersonality(personaKey, hostApi) {
   const api = hostApi !== undefined ? hostApi : (typeof host !== 'undefined' ? host : null);
-  const plan = refreshLiveSessionPersonalityPlan(personaKey, focusedSessionId(), api);
+  const state = (api && api.state) || (typeof host !== 'undefined' && host && host.state) || {};
+  let fallback = '';
+  try { fallback = focusedProfile(); } catch (_) { fallback = ''; }
+  const plan = refreshLiveSessionPersonalityPlan(personaKey, api, state, fallback);
   if (!plan.attempted || !plan.payload) return plan;
   try {
-    await api.request(plan.payload.method, plan.payload.params);
-    return { ok: true, attempted: true, skipped: '' };
+    const result = plan.via === 'requestProfile'
+      ? await api.requestProfile(plan.profile, plan.payload.method, plan.payload.params)
+      : await api.request(plan.payload.method, plan.payload.params);
+    return interpretLiveSessionRefreshResult(result);
   } catch (err) {
     console.warn('[PersonaStudio] live personality refresh failed:', err);
     return { ok: false, attempted: true, skipped: '', error: String((err && err.message) || err) };
@@ -426,8 +483,10 @@ function subscribeFocusedSession(onChange) {
  *    (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
  * 4. Persona/clone apply and Standard Hermes clear do NOT call host.newChat.
  *    After companion apply/reset, refresh the focused live session via
- *    host.request('config.set', { key:'personality', value, session_id })
- *    so Desktop currentPersonality updates mid-session (no history reset).
+ *    host.requestProfile(targetProfile, 'config.set', { key:'personality', value, session_id })
+ *    (fall back to host.request only if requestProfile is missing). Tab/tile
+ *    focus can move without swapping the active gateway socket — do not assume
+ *    host.request hits the focused profile. Live-applied only if result.info != null.
  * 5. focusedSessionProfile change is per-profile Studio state (Promax Magellan):
  *    do not keep another profile's persona selected without applying it.
  *    A profile without its own active overlay becomes stock (no leaked TTS).
@@ -546,8 +605,12 @@ async function resetSessionOverlay(profile, options) {
     });
     if (!res.ok) return false;
     const refresh = await refreshLiveSessionPersonality('none');
-    if (!refresh.ok && refresh.attempted && options && options.notifyOnRefreshFailure) {
-      notifyHost('warning', 'Live session not refreshed', 'Stock Hermes restored in config, but this open chat may still use the previous personality until a new session.');
+    if (!refresh.ok && options && options.notifyOnRefreshFailure) {
+      notifyHost(
+        'warning',
+        'Live session not refreshed',
+        `Stock Hermes restored in config, but this open chat may still use the previous personality (${refresh.skipped || refresh.error || 'refresh failed'}).`
+      );
     }
     return true;
   } catch (err) {
@@ -855,11 +918,11 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
           ? 'none'
           : (applyData.persona || catalogPersonalityKey(bundle.name));
         const refresh = await refreshLiveSessionPersonality(personaKey);
-        if (!refresh.ok && refresh.attempted) {
+        if (!refresh.ok) {
           notifyHost(
             'warning',
             'Live session not refreshed',
-            `Applied ${personaKey} in config, but this open chat may still use the previous personality until a new session.`
+            `Applied ${personaKey} in config, but this open chat may still use the previous personality (${refresh.skipped || refresh.error || 'refresh failed'}).`
           );
         }
       } else {
