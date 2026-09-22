@@ -756,6 +756,67 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(data["agent"]["personalities"]["kitt"]["source"], "hermes-personastudio")
         self.assertEqual(data["tts"]["provider"], "edge")
 
+    def test_apply_mechanic_does_not_write_magellan_tts_or_personality(self):
+        from backend import session_overlay
+
+        mechanic = self.home / "profiles" / "mechanic" / "config.yaml"
+        magellan = self.home / "profiles" / "magellan" / "config.yaml"
+        mechanic.parent.mkdir(parents=True)
+        magellan.parent.mkdir(parents=True)
+        mechanic.write_text(
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: ''\n",
+            encoding="utf-8",
+        )
+        magellan.write_text(
+            "tts:\n"
+            "  provider: voicebox\n"
+            "  providers:\n"
+            "    voicebox:\n"
+            "      voice: c9da87b0-19be-49c4-ab44-01cb7943f5c4\n"
+            "display:\n"
+            "  personality: ''\n"
+            "agent:\n"
+            "  system_prompt: leftover flirty text\n",
+            encoding="utf-8",
+        )
+        apply = session_overlay.apply_session_overlay(
+            "mechanic",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            cfg_path=mechanic,
+        )
+        self.assertTrue(apply["ok"])
+        after_m = yaml.safe_load(mechanic.read_text(encoding="utf-8"))
+        after_g = yaml.safe_load(magellan.read_text(encoding="utf-8"))
+        self.assertEqual(after_m["display"]["personality"], "eric_cartman")
+        self.assertIn("SPEAKING STYLE OVERLAY", after_m["agent"]["personalities"]["eric_cartman"]["system_prompt"])
+        self.assertEqual(after_g["display"]["personality"], "")
+        self.assertEqual(after_g["tts"]["provider"], "voicebox")
+        self.assertEqual(
+            after_g["tts"]["providers"]["voicebox"]["voice"],
+            "c9da87b0-19be-49c4-ab44-01cb7943f5c4",
+        )
+        self.assertEqual(after_g["agent"]["system_prompt"], "leftover flirty text")
+        self.assertTrue(session_overlay.overlay_status("mechanic")["active"])
+        self.assertFalse(session_overlay.overlay_status("magellan")["active"])
+
+        reset_g = session_overlay.reset_session_overlay("magellan", cfg_path=magellan)
+        self.assertTrue(reset_g["ok"])
+        after_g2 = yaml.safe_load(magellan.read_text(encoding="utf-8"))
+        after_m2 = yaml.safe_load(mechanic.read_text(encoding="utf-8"))
+        self.assertEqual(after_g2["tts"]["provider"], "edge")
+        self.assertEqual(after_g2["tts"]["edge"]["voice"], "en-US-AriaNeural")
+        self.assertEqual(after_m2["display"]["personality"], "eric_cartman")
+        self.assertTrue(session_overlay.overlay_status("mechanic")["active"])
+        self.assertFalse(session_overlay.overlay_status("magellan")["active"])
 
     def test_apply_does_not_write_bare_you_are_cartman_identity(self):
         from backend import session_overlay
@@ -945,6 +1006,38 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertNotIn("shouldReloadSessionAfterApply", self.src)
         self.assertNotIn("host.newChat", select)
         self.assertNotIn("startNewChat", self.src)
+        self.assertIn("focusedSessionProfile", self.src)
+        self.assertIn("persona-select-${profileId}", self.src)
+        self.assertIn("syncTitlebarToFocusedProfile", self.src)
+
+    def test_profile_switch_to_other_bot_is_not_user_new_chat(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, sessionId: 'm1', storedId: 'stored-m', profileId: 'mechanic', applyInProgress: false };
+            const decision = decideSessionWatchTick(overlay, 'g1', 'stored-g', 'magellan');
+            console.log(JSON.stringify(decision));
+            """
+        )
+        self.assertEqual(data["action"], "profile-switch")
+        self.assertFalse(data["callNewChat"])
+
+    def test_profile_switch_without_own_overlay_is_stock_ui(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, profileId: 'mechanic', applyInProgress: false };
+            const stock = decideProfileSwitchTick(overlay, 'magellan', { active: false, applied_persona: '' });
+            const own = decideProfileSwitchTick(overlay, 'magellan', { active: true, applied_persona: 'jarvis' });
+            const sel = selectionForAppliedPersona('eric_cartman', [{ id: 'eric_cartman', name: 'Eric Cartman' }]);
+            console.log(JSON.stringify({ stock, own, sel }));
+            """
+        )
+        self.assertEqual(data["stock"]["action"], "stock")
+        self.assertTrue(data["stock"]["resetNewProfile"])
+        self.assertEqual(data["stock"]["selection"], "default")
+        self.assertEqual(data["own"]["action"], "restore-own")
+        self.assertFalse(data["own"]["resetNewProfile"])
+        self.assertEqual(data["own"]["selection"], "jarvis")
+        self.assertEqual(data["sel"], "persona:eric_cartman")
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):

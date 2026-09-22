@@ -227,8 +227,10 @@ function subscribeFocusedSession(onChange) {
     const state = host.state || {};
     const sidUnsub = subscribeAtom(state.focusedSessionId, onChange);
     const storedUnsub = subscribeAtom(state.focusedStoredSessionId, onChange);
+    const profileUnsub = subscribeAtom(state.focusedSessionProfile, onChange);
     if (sidUnsub) unsubs.push(sidUnsub);
     if (storedUnsub) unsubs.push(storedUnsub);
+    if (profileUnsub) unsubs.push(profileUnsub);
   } catch (_) {}
   if (unsubs.length) {
     return () => unsubs.forEach((u) => { try { if (typeof u === 'function') u(); } catch (_) {} });
@@ -253,6 +255,9 @@ function subscribeFocusedSession(onChange) {
  * 4. Persona/clone apply and Standard Hermes clear do NOT call host.newChat.
  *    Hermes injects ephemeral personality at API-call time; the next turn in
  *    this chat picks up the style overlay + cloned TTS.
+ * 5. focusedSessionProfile change is per-profile Studio state (Promax Magellan):
+ *    do not keep another profile's persona selected without applying it.
+ *    A profile without its own active overlay becomes stock (no leaked TTS).
  */
 const APPLY_GATE_MS = 8000;
 
@@ -266,12 +271,49 @@ function isUserNewChatTransition(prevStored, nextStored) {
   return !isEmptySessionId(prevStored) && isEmptySessionId(nextStored);
 }
 
-function decideSessionWatchTick(overlay, nextSessionId, nextStoredId) {
+function selectionForAppliedPersona(appliedPersona, personas) {
+  if (!appliedPersona) return 'default';
+  const slug = String(appliedPersona || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const match = (personas || []).find((p) => {
+    const id = String(p.id || '');
+    const nameSlug = String(p.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return id === appliedPersona || id === slug || nameSlug === slug;
+  });
+  return match ? `persona:${match.id}` : `persona:${slug}`;
+}
+
+function decideProfileSwitchTick(overlay, nextProfile, nextStatus) {
+  if (overlay && overlay.applyInProgress) {
+    return { action: 'gate-refresh', selection: null, resetNewProfile: false, profileId: nextProfile };
+  }
+  const prev = overlay && overlay.profileId;
+  if (!nextProfile || nextProfile === prev) {
+    return { action: 'same', selection: null, resetNewProfile: false, profileId: nextProfile || prev || null };
+  }
+  if (nextStatus && nextStatus.active && nextStatus.applied_persona) {
+    return {
+      action: 'restore-own',
+      selection: nextStatus.applied_persona,
+      resetNewProfile: false,
+      profileId: nextProfile
+    };
+  }
+  return { action: 'stock', selection: 'default', resetNewProfile: true, profileId: nextProfile };
+}
+
+function decideSessionWatchTick(overlay, nextSessionId, nextStoredId, nextProfile) {
   const sessionId = isEmptySessionId(nextSessionId) ? null : nextSessionId;
   const storedId = isEmptySessionId(nextStoredId) ? null : nextStoredId;
   if (overlay && overlay.applyInProgress) {
     return {
       action: 'gate-refresh',
+      overlayPatch: { sessionId, storedId, profileId: nextProfile || overlay.profileId || null },
+      callNewChat: false
+    };
+  }
+  if (nextProfile && overlay && overlay.profileId && nextProfile !== overlay.profileId) {
+    return {
+      action: 'profile-switch',
       overlayPatch: { sessionId, storedId },
       callNewChat: false
     };
@@ -296,6 +338,7 @@ function emptyOverlayState(extra) {
     active: false,
     sessionId: null,
     storedId: null,
+    profileId: null,
     applyInProgress: false,
     applyGateTimer: null
   }, extra || {});
@@ -311,6 +354,7 @@ function beginApplyGate(overlay) {
     overlay.applyGateTimer = null;
     overlay.sessionId = focusedSessionId();
     overlay.storedId = focusedStoredSessionId();
+    overlay.profileId = focusedProfile();
   }, APPLY_GATE_MS);
 }
 
@@ -331,6 +375,17 @@ async function resetSessionOverlay(profile) {
   } catch (err) {
     console.warn('[PersonaStudio] session reset failed:', err);
     return false;
+  }
+}
+
+async function fetchOverlayStatus(profile) {
+  try {
+    const res = await fetch(`${API_BASE}/session/state?profile_id=${encodeURIComponent(profile)}`);
+    if (!res.ok) return { active: false, applied_persona: '', profile_id: profile };
+    return await res.json();
+  } catch (err) {
+    console.warn('[PersonaStudio] session state failed:', err);
+    return { active: false, applied_persona: '', profile_id: profile };
   }
 }
 
@@ -437,7 +492,31 @@ function PersonaStudioRoot() {
 // ── Titlebar Persona Picker Component ─────────────────────────────────────
 function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, refreshVoices }) {
   const [activeId, setActiveId] = useState('default');
-  const overlayRef = useRef(emptyOverlayState());
+  const [profileId, setProfileId] = useState(() => focusedProfile());
+  const overlayRef = useRef(emptyOverlayState({ profileId: focusedProfile() }));
+  const personasRef = useRef(personas);
+  personasRef.current = personas;
+
+  const syncTitlebarToFocusedProfile = useCallback(async () => {
+    const profile = focusedProfile();
+    const overlay = overlayRef.current;
+    beginApplyGate(overlay);
+    overlay.profileId = profile;
+    overlay.sessionId = focusedSessionId();
+    overlay.storedId = focusedStoredSessionId();
+    setProfileId(profile);
+    const status = await fetchOverlayStatus(profile);
+    if (status && status.active && status.applied_persona) {
+      overlay.active = true;
+      setActiveId(selectionForAppliedPersona(status.applied_persona, personasRef.current));
+      window.__ACTIVE_PERSONA_STUDIO__ = { id: status.applied_persona, scope: 'session', profile };
+    } else {
+      overlay.active = false;
+      setActiveId('default');
+      window.__ACTIVE_PERSONA_STUDIO__ = null;
+      await resetSessionOverlay(profile);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -450,9 +529,11 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       if (cancelled) return;
       overlayRef.current = emptyOverlayState({
         sessionId: focusedSessionId(),
-        storedId: focusedStoredSessionId()
+        storedId: focusedStoredSessionId(),
+        profileId: focusedProfile()
       });
       setActiveId('default');
+      setProfileId(focusedProfile());
       window.__ACTIVE_PERSONA_STUDIO__ = null;
     })();
     return () => { cancelled = true; };
@@ -461,14 +542,19 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
   useEffect(() => {
     overlayRef.current.sessionId = focusedSessionId();
     overlayRef.current.storedId = focusedStoredSessionId();
+    overlayRef.current.profileId = focusedProfile();
     const onSessionChange = async () => {
       const overlay = overlayRef.current;
-      const decision = decideSessionWatchTick(overlay, focusedSessionId(), focusedStoredSessionId());
+      const profile = focusedProfile();
+      const decision = decideSessionWatchTick(overlay, focusedSessionId(), focusedStoredSessionId(), profile);
       Object.assign(overlay, decision.overlayPatch);
+      if (decision.action === 'profile-switch') {
+        await syncTitlebarToFocusedProfile();
+        return;
+      }
       if (decision.action !== 'reset-stock') return;
       setActiveId('default');
       window.__ACTIVE_PERSONA_STUDIO__ = null;
-      const profile = focusedProfile();
       const ok = await resetSessionOverlay(profile);
       // User already has the blank New Chat. Do not call host.newChat again.
       if (ok) {
@@ -479,7 +565,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       }
     };
     return subscribeFocusedSession(onSessionChange);
-  }, []);
+  }, [syncTitlebarToFocusedProfile]);
 
   const onSelectPersona = async (id) => {
     console.log('[PersonaStudio] Selected:', id);
@@ -504,6 +590,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
         const ok = await resetSessionOverlay(profile);
         if (ok) {
           overlayRef.current.active = false;
+          overlayRef.current.profileId = profile;
           overlayRef.current.sessionId = focusedSessionId();
           overlayRef.current.storedId = focusedStoredSessionId();
           host.toast({
@@ -604,6 +691,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       applied = applyRes.ok;
       if (applyRes.ok) {
         overlayRef.current.active = true;
+        overlayRef.current.profileId = profile;
         overlayRef.current.sessionId = focusedSessionId();
         overlayRef.current.storedId = focusedStoredSessionId();
       } else {
@@ -643,6 +731,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     style: { display: 'flex', alignItems: 'center', gap: '6px', marginRight: '8px' },
     children: [
       jsx(Select, {
+        key: `persona-select-${profileId}`,
         value: activeId,
         onValueChange: onSelectPersona,
         children: jsxs('div', {

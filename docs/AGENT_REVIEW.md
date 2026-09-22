@@ -40,6 +40,9 @@ A **speaking persona** is three things bound together:
 2. Build a **style-overlay** prompt (strip/rewrite leading “You are X…” into mannerisms; wrap with role-preservation language). Write it to a Studio-managed catalog entry (`source: hermes-personastudio`) and set `display.personality` to that name. **Do not** write character identity into `agent.system_prompt`. Leftover Studio identity in that user-owned field is cleared; real user prompts are kept.
 3. Bind Fish-prefer TTS as before.
 4. Next **user** New Chat restores stash (personality + user `agent.system_prompt` + TTS). Catalog dicts may remain; they do nothing unless selected.
+5. **Per-profile Studio state.** Switching `focusedSessionProfile` (mechanic → Magellan) does **not** imply the previous persona is active. Titlebar resets to `default` for the newly focused profile, or restores **that** profile’s own overlay if session state says it is active. Apply always writes the currently focused profile only. Re-selecting Cartman after a switch applies style + Fish-prefer voice on the **new** profile.
+
+**Promax Magellan retest (Charles):** dropdown still showed Cartman after switching bots. Magellan replied as normal Magellan research soul (no snark); TTS sounded like Cartman. Companion `session/apply` only hit **mechanic**, never **magellan**. Magellan config had no `display.personality` / Studio catalog, leftover Voicebox Cartman id `c9da87b0-…`, leftover `agent.system_prompt` flirty text, and session state only tracked mechanic/eric_cartman. Cartman in the dropdown was **UI-only**; voice came from Magellan leftover Voicebox bind, not a successful Studio apply. Voice without speaking-style overlay is **unacceptable**. Profile-switch must not leave another profile’s persona selected without applying it, and must not leak that profile’s TTS onto the newly focused bot (stock until the user picks again). Mechanic already reset Magellan to Edge/AriaNeural + cleared personality/system_prompt for stock.
 
 **Sticky leftover `agent.system_prompt` (earlier Promax mechanic retest):** empty `display.personality` + Edge Aria still answered as KITT because leftover `agent.system_prompt: You are K.I.T.T....` is used when no personality is named. Reset still stashes/restores that user-owned field (or `''` if the leftover matched a Studio catalog overlay). Studio must not put Cartman/KITT identity back into it on apply. Memories/`USER.md` “Active profile: kitt” can still bias the model (out of band).
 
@@ -78,7 +81,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Path | What changed |
 |---|---|
-| `desktop/plugin.js` | Unified apply through **session overlay**. Apply and Standard Hermes clear **never** call `host.newChat` — next reply in this chat picks up ephemeral style + TTS. Watcher resets **only** on `focusedStoredSessionId` non-null → null (user New Chat) without a second `newChat`. `applyInProgress` gates several seconds. Fallback prompts are mannerisms. Startup `POST /session/reset-all`. |
+| `desktop/plugin.js` | Unified apply through **session overlay**. Apply / Standard Hermes / startup **never** call `host.newChat`. Watcher resets **only** on stored-id New Chat. **Per-profile titlebar:** `focusedSessionProfile` change resets UI to stock (or that profile’s own overlay) and stocks a profile with no overlay so leftover Voicebox TTS cannot leak. |
 | `backend/session_overlay.py` | **New.** Stash/restore personality + user `agent.system_prompt` + TTS. Apply writes a **style overlay** catalog entry + `display.personality` + Fish-prefer TTS. Does **not** clobber user `agent.system_prompt` with “You are Cartman”. Unusable stash → Edge AriaNeural. |
 | `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; catalog `system_prompt` is the style overlay (`source: hermes-personastudio`). |
 | `backend/api.py` | Clone returns `{voice, persona}`. `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
@@ -89,7 +92,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | `backend/storage.py` | Ignore hidden persona dirs / `.studio-managed.json` / `.studio-session.json`. |
 | `install.py` | Deploy `plugin.js` only; delete stray `plugin.py`; optional `--systemd`; default `--sync-voices`; uninstall stops unit; `--purge` reverts tracked keys and removes `personas/` (**never deletes `config.yaml`**). |
 | `seed_presets.py` | Mannerism overlays (Jarvis / Cartman / Storyteller), not “You are X” identity. Portable storage root; do not clobber existing `prompt.md`. |
-| `test_backend.py` | Offline tests for style overlay, role-preservation, apply does not write bare Cartman identity, reset clears overlay, Fish name-score, Edge stock, session-watch race. |
+| `test_backend.py` | Offline tests for style overlay, role-preservation, apply does not write bare Cartman identity, reset clears overlay, Fish name-score, Edge stock, session-watch race, **mechanic apply does not write Magellan**, profile-switch UI stock. |
 | `README.md` | Style overlay vs soul; session vs sticky; Fish-prefer; uninstall vs purge. |
 | `docs/AGENT_REVIEW.md` | This file. |
 
@@ -117,6 +120,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | Titlebar Standard Hermes | Restore stash, or Edge stock if no usable stash. Never `voicebox.voice: default` | **No** `host.newChat`. Next reply uses stock profile soul |
 | User New Chat while overlay active | Restore stash (or Edge stock); plugin watches **`focusedStoredSessionId` non-null → null**, not `focusedSessionId` churn | **No** extra `newChat` — user already has the blank |
 | Plugin / Desktop startup | `POST /session/reset-all`: restore stash; leftover Studio personality cleared; Voicebox `voice: default` → Edge stock. No auto-apply | **No** `host.newChat` — Studio never starts sessions |
+| Switch focused profile (mechanic → Magellan) | Session overlay is **per profile**. New profile with no own overlay is reset to stock (leftover Voicebox Cartman → Edge). Previous profile’s overlay stays on its config | Titlebar `default` unless that profile has an active overlay. **No** `host.newChat`. Re-selecting a persona applies to the **new** focused profile |
 | Companion refresh | Same startup reset. Never auto-applies a Studio persona | — |
 | Studio Save Persona | Bundle under `personas/` | Not auto-applied until titlebar |
 | Studio Clone | Provider clone **and** matching persona bundle | Not auto-applied |
@@ -171,12 +175,15 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 3. **Research + Jarvis (if that profile exists).** Pick Jarvis on the research agent. Expect research behavior from that profile’s soul/AGENTS.md, replies/speaks like Jarvis.
 4. **New chat again → profile stock.** Click New Chat. Send a short line.
    - Expect default profile text (mechanic = PC repair, not Cartman identity) + **Edge / AriaNeural** (or stashed profile TTS). Style overlay must be gone.
+5. **Profile switch (Magellan).** On mechanic, pick Cartman, then switch the focused bot to **Magellan** without applying again.
+   - Titlebar must **not** keep Cartman as an implied apply. Expect Magellan **research soul** + **stock TTS** (Edge/Aria or Magellan stash), not Cartman voice without Cartman style.
+   - Re-select Cartman on Magellan → Magellan that *speaks like* Cartman (research job + snark + Fish). `session/apply` must hit **magellan**.
 
 ### Latency / Fish-prefer
 
-5. Confirm titlebar clone list includes **both** `Cartman · Fish` and `Cartman · Voicebox` (and Jarvis / KITT if those clones exist). Not Voicebox-only.
-6. Persona-row apply still prefers Fish. Optional slow path: pick `Cartman · Voicebox`. Confirm local GPU is used. Do not treat Voicebox latency as a Studio bug; do not patch Voicebox in this repo.
-7. After New Chat restore, TTS must be **Edge / AriaNeural** (or the real pre-apply stash), never Voicebox `voice: default`, never an invented Jarvis UUID. Mechanic’s old Fish binds / Jarvis Voicebox backup are **not** stock. Fish-prefer is only for an explicit dropdown persona/clone pick.
+6. Confirm titlebar clone list includes **both** `Cartman · Fish` and `Cartman · Voicebox` (and Jarvis / KITT if those clones exist). Not Voicebox-only.
+7. Persona-row apply still prefers Fish. Optional slow path: pick `Cartman · Voicebox`. Confirm local GPU is used. Do not treat Voicebox latency as a Studio bug; do not patch Voicebox in this repo.
+8. After New Chat restore, TTS must be **Edge / AriaNeural** (or the real pre-apply stash), never Voicebox `voice: default`, never an invented Jarvis UUID. Mechanic’s old Fish binds / Jarvis Voicebox backup are **not** stock. Fish-prefer is only for an explicit dropdown persona/clone pick.
 
 ### Original apply / hygiene
 
@@ -199,6 +206,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 - [ ] Dropdown apply is a **style + voice overlay**; Mechanic+Cartman keeps PC-repair job with Cartman mannerisms; catalog prompt contains `SPEAKING STYLE OVERLAY` / SOUL.md role language
 - [ ] Apply does **not** write bare `You are Cartman` as `agent.system_prompt`
 - [ ] Apply and Standard Hermes clear do **not** call `host.newChat`; next reply in this chat picks up the overlay
+- [ ] Switching profiles resets titlebar to stock (or that profile’s own overlay); Magellan must not keep mechanic’s Cartman selected without a Magellan apply; no voice-without-style leftover TTS
 - [ ] Session watcher resets overlay **only** on `focusedStoredSessionId` non-null → null; first-prompt `focusedSessionId` churn does **not** wipe or open a second blank; user New Chat does **not** call `host.newChat` again
 - [ ] Session reset never writes Voicebox `voice: default` or a Studio clone as stock
 - [ ] Clone API creates/updates a persona bundle
