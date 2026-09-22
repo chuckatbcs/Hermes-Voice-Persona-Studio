@@ -23,8 +23,8 @@ A **speaking persona** is three things bound together:
 | **Profile selected** | **Stock profile identity.** Hermes profile defaults, `SOUL.md`, `AGENTS.md`, and stock persona modals. No Studio identity replacement. |
 | **Titlebar dropdown apply** | **Style + voice overlay only** for **this chat session**. Keep the profile’s soul/job/skills. Overlay speaking mannerisms/tone from the Studio persona **and** bind the cloned TTS voice (Fish-prefer). Mechanic + Cartman ⇒ **Mechanic that speaks like Cartman** (snarky Cartman tone, still does PC repair). Research agent + Jarvis ⇒ **researches per its Hermes soul/AGENTS.md, replies/speaks like Jarvis**. |
 | **New chat / no Studio overlay** | Back to **profile stock** (soul + Edge/`en-US-AriaNeural` or stashed profile TTS). Empty `display.personality`. User-owned `agent.system_prompt` restored from stash (or left alone). Must not inherit Studio style, leftover KITT/Cartman identity text, Voicebox Jarvis, or `voice: default`. |
-| **Persona Studio modal** | Design: create, clone, edit voices and persona bundles. Does not auto-apply on startup or companion refresh. Bundles store **mannerism** text, not “You are X” identity. |
-| **Studio “Apply Voice to Bot”** | Group-chat bot TTS bind (profile TTS keys). Not a titlebar session default. |
+| **Persona Studio modal** | Design + **Apply to this chat**. Sections: Target profile · Choose persona (Fish vs Voicebox labeled) · Character strength · Apply · Current applied state. Same unified session apply as the titlebar (resolve-tts + `session/apply` + mid-session refresh + Fish `--fish-voice`). Does not auto-apply on startup or companion refresh. Bundles store **mannerism** text, not “You are X” identity. |
+| **Studio “Assign voice to bot”** | Group-chat bot TTS bind (profile TTS keys). Secondary; not the session Apply button. |
 
 **Promax symptom (Charles, mechanic + Cartman):** TTS was Cartman voice; reply text stayed PC-Mechanic (SOUL) and was **not** snarky Cartman. Voice applied; speaking-style overlay did not land (or fought SOUL). Root cause: `apply_session_overlay` wrote full `agent.system_prompt` = “You are Eric Cartman…” which **replaces/competes** with identity instead of adding mannerisms. Cartman `prompt.md` was also full-identity text.
 
@@ -49,7 +49,9 @@ A **speaking persona** is three things bound together:
 
 **Character strength (Charles, 2026-09-22, amended):** 0–100% slider. **0% = profile soul only** (no style overlay). **100% = character completely eclipses SOUL.md / AGENTS.md for this session.** Intermediate values blend. Soft/Medium/Heavy are snap labels only. Titlebar apply sends the pack’s stored percent. Temperature stays TTS-only. **100% overlay wording (Charles, Promax critic):** hardened name-lock + “this block wins” + closing “You are {label}. Your name is {label}.” so “Who are you?” answers Cartman/Jarvis, not Critic/Mechanic — still no Hermes SOUL patch.
 
-**Studio save / layout (Charles, Promax):** selecting Cartman did not hydrate `name`, so Save Persona alerted “Please enter a name.” Studio now hydrates the selected pack (name, prompt, strength, voice), **PUT** `/personas/{id}` updates in place, empty name falls back to the pack name, and Studio stays open after save. Window is sectioned top→bottom: Pick pack → Personality (LLM + strength) → Voice (TTS) → Clone → Apply/save. Notifications use Hermes `host.notify({ kind, message, title })` (not `host.toast`); save success cannot throw after a successful PUT/POST.
+**Studio save / layout (Charles, Promax):** selecting Cartman did not hydrate `name`, so Save Persona alerted “Please enter a name.” Studio now hydrates the selected pack (name, prompt, strength, voice), **PUT** `/personas/{id}` updates in place, empty name falls back to the pack name, and Studio stays open after save. Notifications use Hermes `host.notify({ kind, message, title })` (not `host.toast`); save success cannot throw after a successful PUT/POST.
+
+**Studio nav / layout (Charles, 2026-09-22 follow-up):** Studio was still hard to scan (Save was the footer primary; session Apply lived only in the titlebar; Fish vs Voicebox and Character strength were mid-page). Layout is now labeled sections: **Target profile** (focused Hermes profile) → **Choose persona** (pack list + Fish Audio (cloud) vs Voicebox (local GPU) + voice) → **Character strength** (0–100% with plain helper) → **Apply** (one primary **Apply to this chat**) → **Current applied state**. Preview / Save pack / Reset / clone / group-chat bind are visually quieter. Apply reuses `applySpeakingBundleToProfile` (same resolve-tts / session/apply / live refresh / Fish pin as the titlebar); slider strength is persisted then applied.
 
 **Titlebar packs only (Charles, 2026-09-22):** hide voice-only clones that are not backed by a persona pack. After Promax cleanup, complete packs are amanda, cartman, flirty, jarvis, sexy_girl, vincent_price, voldemort. Incomplete stubs (hermes_default, hermes_porky_pig, kitt, storyteller) were deleted — do not auto-reseed them. Titlebar lists **complete packs** (non-stub prompt + usable cloned `voice_id`, or a Fish twin of that pack) plus Standard Hermes + Open Studio. Voice-only orphans stay in Studio for cloning/editing. **`install.py --sync-voices` must not recreate those deleted stubs** from name-only Fish clones (`Hermes kitt`); sync/ensure only create a pack when `fallback_system_prompt` is non-stub, but still rebind `voice_id` on existing cartman/jarvis.
 
@@ -130,10 +132,10 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | Plugin / Desktop startup | `POST /session/reset-all`: restore stash; leftover Studio personality cleared; Voicebox `voice: default` → Edge stock. No auto-apply | **No** `host.newChat` — Studio never starts sessions |
 | Switch focused profile (mechanic → Magellan) | Session overlay is **per profile**. New profile with no own overlay is reset to stock: **always** `display.personality: ""` (even untagged `cartman`), leftover Voicebox → Edge. Previous profile’s overlay stays on its config | Titlebar `default` unless that profile has an active overlay. **No** `host.newChat`. Re-selecting a persona applies to the **new** focused profile |
 | Companion refresh | Same startup reset. Never auto-applies a Studio persona | — |
-| Studio Save Persona | Bundle under `personas/` including **character_strength** (LLM). Temperature stays TTS-only. | Not auto-applied until titlebar |
+| Studio Save Persona | Bundle under `personas/` including **character_strength** (LLM). Temperature stays TTS-only. | Not auto-applied until titlebar or Studio **Apply to this chat** |
 | Studio Clone | Provider clone **and** matching persona bundle | Not auto-applied |
 | `POST /sync-from-voices` or `install.py --sync-voices` | Existing packs rebound; **no new pack** if the only prompt would be a stub fallback (name-only `Hermes kitt`). Rich Voicebox description may still create. | No session change |
-| Studio “Apply Voice to Bot” | TTS keys only (surgical, group-chat). Does **not** write session overlay | Existing session may still use old voice until new chat |
+| Studio “Assign voice to bot” | TTS keys only (surgical, group-chat). Does **not** write session overlay | Existing session may still use old voice until new chat |
 | Install | Plugin copy + optional systemd + seed + sync | N/A |
 | Uninstall (default) | Plugin removed; companion stopped; personas + config kept | N/A |
 | Uninstall `--purge` | Personas dir removed (includes session stash + managed index); tracked config keys reverted; `config.yaml` files remain | N/A |
@@ -186,10 +188,13 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 5. **Profile switch (Magellan).** On mechanic, pick Cartman, then switch the focused bot to **Magellan** without applying again.
    - Titlebar must **not** keep Cartman as an implied apply. Expect Magellan **research soul** + **stock TTS** (Edge/Aria or Magellan stash), not Cartman voice without Cartman style.
    - Re-select Cartman on Magellan → Magellan that *speaks like* Cartman (research job + snark + Fish). `session/apply` must hit **magellan**.
-6. **Studio Save Persona (hydrate + PUT).** Open Studio → select Cartman → name/prompt/voice/strength must fill from the pack (no empty name). Set Character strength to **100%** → **Save/Update Persona**.
+6. **Studio Save Persona (hydrate + PUT).** Open Studio → select Cartman → name/prompt/voice/strength must fill from the pack (no empty name). Set Character strength to **100%** → **Save pack**.
    - Must **not** alert “Please enter a name.”
    - Studio stays open; toast reports update + 100%.
    - Re-open / re-select Cartman still shows 100%. Titlebar apply of Cartman must send 100% eclipse.
+7. **Studio Apply (nav / layout).** Open Studio → confirm **Target profile** shows the focused bot → pick a **Fish** persona (Fish Audio (cloud) selected, voice labeled `· Fish`) → set **Character strength** → click the primary **Apply to this chat**.
+   - Expect success toast (live refresh vs config-only) and **Current applied state** to show the live overlay (persona · Fish · strength).
+   - Next reply in this chat uses the overlay. Group-chat **Assign voice to bot** must stay secondary.
 
 ### Latency / Fish-prefer
 
@@ -233,6 +238,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 - [ ] Offline `python3 -m unittest test_backend.py -v` passes
 - [ ] README documents session vs sticky apply and Fish-prefer
 - [ ] Studio pack select hydrates name/prompt/strength/voice; Save **PUT**s existing packs and **POST**s new ones; empty name falls back to the selected pack; Studio stays open with a success toast
+- [ ] Studio panel is sectioned (Target profile · Choose persona · Character strength · Apply · Current applied state); Fish vs Voicebox and Character strength have visible labels + helper text; **Apply to this chat** is the primary action
 - [ ] **Charles (`chuckatbcs`) explicitly approves merge**
 
 ---

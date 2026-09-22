@@ -90,7 +90,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
 3. Picking a **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. **Character strength (0–100%)** on the pack: **0%** = profile SOUL / AGENTS.md only (no style overlay); **100%** = the character **eclipses** SOUL for this session; mid values blend. This is **not** TTS Temperature / Expressiveness. The titlebar lists only packs with a non-stub prompt and a usable cloned voice; voice-only clones stay in Studio. Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only.
-4. **Studio workflow (top → bottom):** pick/create a pack (name + avatar hydrate from the selected persona) → Personality / Character strength (LLM) → Voice (TTS) → Clone → Save/Update. Selecting Cartman fills the form; **Save Persona** **updates** that pack (`PUT /personas/{id}`) including Character strength 100%. Empty name uses the selected pack name. Studio stays open after save. **New** still **POST**s a new pack.
+4. **Studio workflow (top → bottom):** **Target profile** (focused Hermes bot) → **Choose persona** (pack + Fish Audio (cloud) vs Voicebox (local GPU) + voice) → **Character strength** 0–100% → primary **Apply to this chat** → **Current applied state**. Selecting Cartman fills the form; **Save pack** **updates** that pack (`PUT /personas/{id}`) including Character strength 100%. Empty name uses the selected pack name. Studio stays open after save. **New** still **POST**s a new pack. Preview / Reset / clone / group-chat bind stay secondary.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
@@ -99,9 +99,9 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 4. Adjust **Speed** and **Temperature / Expressiveness (TTS only)** for audition. Use **Character strength (LLM) 0–100%** — 0% = profile soul only, 100% = character replaces soul for this session. Temperature does **not** change how in-character the text replies are.
 
 ### 3. Assigning a Voice to a Bot for Group Chats
-1. In the Studio dialog, locate the **`🤖 Assign Voice to Hermes Bot / Profile`** section.
+1. In the Studio dialog, locate the quieter **Group-chat voice bind** section.
 2. Select the target bot from the dropdown (e.g., `PC Maintainence (mechanic)`, `Research Agent (magellan)`, `critic`, etc.).
-3. Click **`🚀 Apply Voice to Bot`**.
+3. Click **`Assign voice to bot`**.
 4. That bot's profile is updated immediately. When chatting in a Group Chat, mention `@botname` and it will speak with its individual cloned voice!
 
 ### 4. Cloning a New Voice

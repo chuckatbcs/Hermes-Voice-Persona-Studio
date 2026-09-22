@@ -90,6 +90,9 @@ def overlay_status(profile_id: str, *, state_path: Optional[Path] = None) -> Dic
         "profile_id": profile_id,
         "active": bool(entry.get("active")),
         "applied_persona": entry.get("applied_persona") or "",
+        "character_strength": entry.get("character_strength"),
+        "provider": entry.get("provider") or "",
+        "voice_name": entry.get("voice_name") or "",
         "has_stash": bool(entry.get("stash")),
     }
 
@@ -300,6 +303,8 @@ def apply_session_overlay(
     entry["active"] = True
     entry["applied_persona"] = bot_profiles._clean_key(persona_name)
     entry["character_strength"] = strength
+    entry["provider"] = provider or ""
+    entry["voice_name"] = voice_name or ""
     profiles[profile_id] = entry
     save_session_state(state, state_path)
 

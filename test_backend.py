@@ -1201,6 +1201,12 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(after["display"]["personality"], "eric_cartman")
         self.assertEqual(after["agent"]["personalities"]["eric_cartman"]["character_strength"], 100)
         self.assertNotEqual((after.get("agent") or {}).get("system_prompt") or "", overlay)
+        status = session_overlay.overlay_status("default")
+        self.assertTrue(status["active"])
+        self.assertEqual(status["applied_persona"], "eric_cartman")
+        self.assertEqual(status["character_strength"], 100)
+        self.assertEqual(status["provider"], "fish_audio")
+        self.assertEqual(status["voice_name"], "Hermes eric_cartman")
 
     def test_apply_mid_character_strength_writes_blend_overlay(self):
         from backend import session_overlay
@@ -1406,19 +1412,24 @@ class TestPluginSessionWatchRace(unittest.TestCase):
 
     def test_apply_and_standard_clear_do_not_call_newchat(self):
         start = self.src.index("const onSelectPersona = async (id) => {")
-        end = self.src.index("const currentLookup = lookupSelection")
+        end = self.src.index("const listablePersonas")
         select = self.src[start:end]
+        apply_fn = self.src[
+            self.src.index("// STUDIO_APPLY_BEGIN") : self.src.index("// STUDIO_APPLY_END")
+        ]
         self.assertNotIn("startNewChat", select)
         self.assertNotIn("shouldReloadSessionAfterApply", self.src)
         self.assertNotIn("host.newChat", select)
+        self.assertNotIn("host.newChat", apply_fn)
         self.assertNotIn("startNewChat", self.src)
         self.assertIn("focusedSessionProfile", self.src)
         self.assertIn("persona-select-${profileId}", self.src)
         self.assertIn("syncTitlebarToFocusedProfile", self.src)
-        self.assertIn("character_strength", select)
-        self.assertIn("refreshLiveSessionPersonality", select)
-        self.assertIn("Live session refreshed", select)
-        self.assertIn("config only", select)
+        self.assertIn("applySpeakingBundleToProfile", select)
+        self.assertIn("character_strength", apply_fn)
+        self.assertIn("refreshLiveSessionPersonality", apply_fn)
+        self.assertIn("Live session refreshed", apply_fn)
+        self.assertIn("config only", apply_fn)
         self.assertIn("config.set", self.src)
         self.assertIn("requestProfile", self.src)
         self.assertIn("profileRoutes", self.src)
@@ -1428,22 +1439,28 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("complete packs", self.src)
         self.assertIn("Character strength (LLM) — 0% = profile soul only", self.src)
         self.assertIn("Temperature / Expressiveness (TTS only)", self.src)
-        self.assertIn("1. Pick / create pack", self.src)
-        self.assertIn("2. Personality (LLM)", self.src)
-        self.assertIn("3. Voice (TTS)", self.src)
-        self.assertIn("4. Clone new voice", self.src)
-        self.assertIn("5. Apply / save", self.src)
+        self.assertIn("Target profile", self.src)
+        self.assertIn("Choose persona", self.src)
+        self.assertIn("Character strength", self.src)
+        self.assertIn("Apply to this chat", self.src)
+        self.assertIn("Current applied state", self.src)
+        self.assertIn("Fish Audio (cloud)", self.src)
+        self.assertIn("Voicebox (local GPU)", self.src)
+        self.assertIn("handleApplyToChat", self.src)
         self.assertIn("applyPackToForm", self.src)
         self.assertIn("hydrateFormFromPack", self.src)
-        start = self.src.index("const handleSavePersona = async () => {")
-        end = self.src.index("const handleAssignVoiceToBot")
+        start = self.src.index("const persistStudioPack = async () => {")
+        end = self.src.index("const handleSavePersona = async () => {")
         save = self.src[start:end]
         self.assertIn("personaSaveRequest", save)
         self.assertIn("plan.method", save)
         self.assertNotIn("onOpenChange(false)", save)
         self.assertNotIn("Please enter a name for the Persona.", save.split("plan.error")[0])
         self.assertNotIn("host.toast", self.src)
-        self.assertIn("notifyHost", save)
+        handle_save = self.src[
+            self.src.index("const handleSavePersona = async () => {") : self.src.index("const handleApplyToChat")
+        ]
+        self.assertIn("notifyHost", handle_save)
         self.assertIn("host.notify", self.src)
 
     def test_profile_switch_to_other_bot_is_not_user_new_chat(self):
@@ -1566,7 +1583,16 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               notify: (payload) => calls.push(payload)
             });
             const noApi = notifyHost('info', 'Title', 'Message', {});
-            console.log(JSON.stringify({ hydrated, unnamed, created, missing, notified, calls, noApi }));
+            const stock = formatStudioLiveStatus({ active: false, applied_persona: '', profile_id: 'mechanic' });
+            const live = formatStudioLiveStatus({
+              active: true,
+              applied_persona: 'eric_cartman',
+              profile_id: 'mechanic',
+              provider: 'fish_audio',
+              voice_name: 'Hermes eric_cartman',
+              character_strength: 100
+            });
+            console.log(JSON.stringify({ hydrated, unnamed, created, missing, notified, calls, noApi, stock, live }));
             """,
         )
         self.assertEqual(data["hydrated"]["name"], "Eric Cartman")
@@ -1584,6 +1610,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["calls"][0]["title"], "Persona Updated")
         self.assertIn("100%", data["calls"][0]["message"])
         self.assertFalse(data["noApi"])
+        self.assertEqual(data["stock"]["headline"], 'Stock Hermes on "mechanic"')
+        self.assertIn("Live: eric_cartman · Fish", data["live"]["headline"])
+        self.assertIn("100%", data["live"]["detail"])
 
     def test_live_session_personality_refresh_plan(self):
         slug = self.src[self.src.index("function slugifyName") : self.src.index("function nameTokens")]
