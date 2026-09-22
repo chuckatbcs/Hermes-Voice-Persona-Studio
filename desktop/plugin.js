@@ -77,6 +77,7 @@ function playAudioBase64(b64, mime = 'audio/wav') {
 function PersonaStudioRoot() {
   const [studioOpen, setStudioOpen] = useState(false);
   const [personas, setPersonas] = useState([]);
+  const [voices, setVoices] = useState([]);
 
   const refreshPersonas = useCallback(async () => {
     try {
@@ -88,22 +89,36 @@ function PersonaStudioRoot() {
     } catch (_) {}
   }, []);
 
+  const refreshVoices = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/voices?provider=voicebox`);
+      if (res.ok) {
+        const list = await res.json();
+        setVoices(list.filter(v => v.voice_type === 'cloned'));
+      }
+    } catch (_) {}
+  }, []);
+
   useEffect(() => {
     refreshPersonas();
-    const interval = setInterval(refreshPersonas, 8000);
+    refreshVoices();
+    const interval = setInterval(() => {
+      refreshPersonas();
+      refreshVoices();
+    }, 8000);
     return () => clearInterval(interval);
-  }, [refreshPersonas]);
+  }, [refreshPersonas, refreshVoices]);
 
   return jsxs(React.Fragment, {
     children: [
-      jsx(TitlebarPersonaPicker, { openStudio: () => setStudioOpen(true), personas, refreshPersonas }),
+      jsx(TitlebarPersonaPicker, { openStudio: () => setStudioOpen(true), personas, voices, refreshPersonas, refreshVoices }),
       jsx(StudioModal, { open: studioOpen, onOpenChange: setStudioOpen, refreshPersonas })
     ]
   });
 }
 
 // ── Titlebar Persona Picker Component ─────────────────────────────────────
-function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
+function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, refreshVoices }) {
   const [activeId, setActiveId] = useState('default');
 
   // No local state — receives from parent
@@ -115,54 +130,89 @@ function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
       return;
     }
     setActiveId(id);
-    const chosen = personas.find(p => p.id === id);
+    
+    // Check voices first (they have priority since they're what the user created)
+    let chosen = voices.find(v => v.id === id);
+    if (chosen) {
+      // Voice selected - assign it to the active profile
+      console.log('[PersonaStudio] Voice selected:', chosen.name);
+      const profile = host.state.focusedSessionProfile.get();
+      if (profile) {
+        try {
+          const assignRes = await fetch(`${API_BASE}/profiles/${profile}/assign-voice`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              provider: chosen.provider,
+              voice_id: chosen.id,
+              voice_name: chosen.name
+            })
+          });
+          if (assignRes.ok) {
+            host.toast({
+              title: `🎙️ Voice Assigned`,
+              message: `${chosen.name} assigned to "${profile}"`
+            });
+          } else {
+            console.warn('[PersonaStudio] Voice assignment failed');
+          }
+        } catch (e) {
+          console.warn('[PersonaStudio] Voice assignment error:', e);
+        }
+      }
+      return;
+    }
+
+    // Check personas (seeded/scripted personas with system prompts)
+    chosen = personas.find(p => p.id === id);
     if (!chosen) return;
 
-    console.log('[PersonaStudio] Applying persona:', chosen.name);
-    console.log('[PersonaStudio] Session:', host.state.focusedSessionId.get(), host.state.focusedSessionProfile.get());
-    // Apply persona by injecting its system prompt as a user message
-    const sessionId = host.state.focusedSessionId.get();
-    if (sessionId) {
+    // Apply persona via backend (writes to config.yaml via Hermes's built-in personality system)
+    if (chosen.system_prompt) {
       try {
-        const personaMessage = `[System: Switching to persona "${chosen.name}". From now on, adopt this persona and follow these instructions: ${chosen.system_prompt}]`;
-        console.log('[PersonaStudio] Submitting to session:', sessionId);
-        const result = await host.requestProfile(
-          { connectionId: host.state.focusedSessionOwner.get()?.connectionId || null, profile: host.state.focusedSessionProfile.get() },
-          'prompt.submit',
-          { session_id: sessionId, text: personaMessage }
-        );
-        console.log('[PersonaStudio] Result:', result);
-
-        // Also assign the voice to the active profile
-        if (chosen.voice_id && chosen.voice_id !== 'default') {
-          try {
-            const assignRes = await fetch(`${API_BASE}/profiles/${host.state.focusedSessionProfile.get()}/assign-voice`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                provider: chosen.provider,
-                voice_id: chosen.voice_id,
-                voice_name: chosen.voice_name
-              })
-            });
-            if (assignRes.ok) {
-              console.log('[PersonaStudio] Voice assigned:', chosen.voice_name);
-              host.toast({
-                title: `${chosen.avatar} Voice Assigned`,
-                message: `${chosen.voice_name} assigned to profile "${host.state.focusedSessionProfile.get()}"`
-              });
-            } else {
-              console.warn('[PersonaStudio] Voice assignment failed');
-            }
-          } catch (e) {
-            console.warn('[PersonaStudio] Voice assignment error:', e);
-          }
+        const res = await fetch(`${API_BASE}/profiles/${host.state.focusedSessionProfile.get()}/set-persona`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            persona_name: chosen.name,
+            persona_prompt: chosen.system_prompt
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          console.log('[PersonaStudio] Persona set:', data);
+          host.toast({
+            title: `${chosen.avatar} Persona Switched`,
+            message: `${data.message || 'Persona set — restart session to take effect'}`
+          });
+        } else {
+          console.warn('[PersonaStudio] Persona set failed');
         }
       } catch (e) {
-        console.warn('[PersonaStudio] Failed to apply persona:', e);
+        console.warn('[PersonaStudio] Persona set error:', e);
       }
-    } else {
-      console.warn('[PersonaStudio] No focused session - persona not applied');
+    }
+
+    // Also assign the voice to the active profile
+    if (chosen.voice_id && chosen.voice_id !== 'default') {
+      try {
+        const assignRes = await fetch(`${API_BASE}/profiles/${host.state.focusedSessionProfile.get()}/assign-voice`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: chosen.provider,
+            voice_id: chosen.voice_id,
+            voice_name: chosen.voice_name
+          })
+        });
+        if (assignRes.ok) {
+          console.log('[PersonaStudio] Voice assigned:', chosen.voice_name);
+        } else {
+          console.warn('[PersonaStudio] Voice assignment failed');
+        }
+      } catch (e) {
+        console.warn('[PersonaStudio] Voice assignment error:', e);
+      }
     }
 
     host.toast({
@@ -173,8 +223,10 @@ function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
     window.__ACTIVE_PERSONA_STUDIO__ = chosen;
   };
 
-  const current = personas.find(p => p.id === activeId);
-  const triggerLabel = current ? `${current.avatar} ${current.name}` : '🎭 Personas';
+  const currentPersona = personas.find(p => p.id === activeId);
+  const currentVoice = voices.find(v => v.id === activeId);
+  const current = currentPersona || currentVoice;
+  const triggerLabel = current ? `${current.avatar || '🎙️'} ${current.name}` : '🎭 Personas';
 
   return jsxs('div', {
     style: { display: 'flex', alignItems: 'center', gap: '6px', marginRight: '8px' },
@@ -189,7 +241,7 @@ function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
               children: jsx(SelectValue, { placeholder: triggerLabel, children: triggerLabel })
             }),
             jsx(SelectContent, {
-              className: 'min-w-[180px] bg-popover text-popover-foreground border border-border shadow-lg rounded-md p-1',
+              className: 'min-w-[200px] bg-popover text-popover-foreground border border-border shadow-lg rounded-md p-1',
               children: jsxs('div', {
                 children: [
                   jsx(SelectItem, {
@@ -197,14 +249,32 @@ function TitlebarPersonaPicker({ openStudio, personas, refreshPersonas }) {
                     className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
                     children: '🤖 Standard Hermes'
                   }),
-                  personas.map(p =>
-                    jsx(SelectItem, {
-                      key: p.id,
-                      value: p.id,
-                      className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
-                      children: `${p.avatar || '🎙️'} ${p.name}${p.voice_name && p.voice_name !== 'Default' ? `  🎵 ${p.voice_name}` : ''}`
-                    })
-                  ),
+                  voices.length > 0 && jsxs('div', {
+                    children: [
+                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎙️ VOICES' }),
+                      voices.map(v =>
+                        jsx(SelectItem, {
+                          key: v.id,
+                          value: v.id,
+                          className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
+                          children: `${v.voice_type === 'cloned' ? '👤' : '🌟'} ${v.name}`
+                        })
+                      )
+                    ]
+                  }),
+                  personas.length > 0 && jsxs('div', {
+                    children: [
+                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎭 PERSONAS' }),
+                      personas.map(p =>
+                        jsx(SelectItem, {
+                          key: p.id,
+                          value: p.id,
+                          className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
+                          children: `${p.avatar || '🎭'} ${p.name}`
+                        })
+                      )
+                    ]
+                  }),
                   jsx('div', { style: { height: '1px', background: 'var(--border)', margin: '4px 0' } }),
                   jsx(SelectItem, {
                     value: '__open_studio__',

@@ -147,3 +147,55 @@ def assign_voice_to_profile(
         "provider": target_prov,
         "voice": clean_name if target_prov == "fish" else voice_id,
     }
+
+
+def set_profile_persona(
+    profile_id: str,
+    persona_name: str,
+    persona_prompt: str,
+) -> Dict[str, Any]:
+    """Set the persona for a Hermes profile via display.personality.
+    
+    This uses Hermes's built-in personality system — the same path as /personality slash command.
+    The persona prompt is stored in agent.personalities.<name> and selected via display.personality.
+    """
+    if profile_id == "default":
+        cfg_path = HERMES_HOME / "config.yaml"
+    else:
+        cfg_path = PROFILES_DIR / profile_id / "config.yaml"
+
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Configuration file not found for profile '{profile_id}' at {cfg_path}")
+
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    # Ensure agent section exists
+    if "agent" not in cfg:
+        cfg["agent"] = {}
+    
+    agent = cfg["agent"]
+    
+    # Ensure personalities section exists
+    if "personalities" not in agent or not isinstance(agent["personalities"], dict):
+        agent["personalities"] = {}
+    
+    # Add/update the persona (normalized name)
+    clean_name = persona_name.lower().replace(" ", "_").replace("-", "_")
+    agent["personalities"][clean_name] = persona_prompt
+    
+    # Set display.personality to activate it
+    if "display" not in cfg:
+        cfg["display"] = {}
+    cfg["display"]["personality"] = clean_name
+
+    # Write back safely
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+    return {
+        "ok": True,
+        "profile_id": profile_id,
+        "persona": clean_name,
+        "message": f"Persona '{persona_name}' set for profile '{profile_id}' — restart session to take effect",
+    }

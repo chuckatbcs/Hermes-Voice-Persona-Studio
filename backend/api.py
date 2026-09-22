@@ -54,6 +54,11 @@ class AssignVoiceRequest(BaseModel):
     voice_name: str
 
 
+class SetPersonaRequest(BaseModel):
+    persona_name: str
+    persona_prompt: str
+
+
 @router.get("/status")
 def get_status() -> Dict[str, Any]:
     return {
@@ -239,6 +244,18 @@ def assign_bot_voice(profile_id: str, req: AssignVoiceRequest) -> Dict[str, Any]
             provider=req.provider,
             voice_id=req.voice_id,
             voice_name=req.voice_name,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/profiles/{profile_id}/set-persona")
+def set_bot_persona(profile_id: str, req: SetPersonaRequest) -> Dict[str, Any]:
+    try:
+        return bot_profiles.set_profile_persona(
+            profile_id=profile_id,
+            persona_name=req.persona_name,
+            persona_prompt=req.persona_prompt,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
