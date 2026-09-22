@@ -267,6 +267,30 @@ function personaSaveRequest(fields) {
     body: body
   };
 }
+
+function notifyHost(kind, title, message, hostApi) {
+  const payload = {
+    kind: kind || 'info',
+    message: String(message || title || '')
+  };
+  if (title) payload.title = String(title);
+  try {
+    if (hostApi !== undefined) {
+      if (hostApi && typeof hostApi.notify === 'function') {
+        hostApi.notify(payload);
+        return true;
+      }
+    } else if (typeof host !== 'undefined' && host && typeof host.notify === 'function') {
+      host.notify(payload);
+      return true;
+    }
+  } catch (_) {}
+  try {
+    const label = payload.title ? `${payload.title} — ${payload.message}` : payload.message;
+    console.log(`[PersonaStudio] ${payload.kind}: ${label}`);
+  } catch (_) {}
+  return false;
+}
 // STUDIO_FORM_END
 
 function preferredProviderForPersona(persona, voices) {
@@ -662,10 +686,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       const ok = await resetSessionOverlay(profile);
       // User already has the blank New Chat. Do not call host.newChat again.
       if (ok) {
-        host.toast({
-          title: '🤖 Standard Hermes',
-          message: 'New chat uses stock Hermes text + voice (Studio overlay cleared)'
-        });
+        notifyHost('info', '🤖 Standard Hermes', 'New chat uses stock Hermes text + voice (Studio overlay cleared)');
       }
     };
     return subscribeFocusedSession(onSessionChange);
@@ -697,10 +718,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
           overlayRef.current.profileId = profile;
           overlayRef.current.sessionId = focusedSessionId();
           overlayRef.current.storedId = focusedStoredSessionId();
-          host.toast({
-            title: '🤖 Standard Hermes',
-            message: `Stock profile soul on "${profile}" — next reply in this chat, no new session`
-          });
+          notifyHost('info', '🤖 Standard Hermes', `Stock profile soul on "${profile}" — next reply in this chat, no new session`);
         } else {
           clearApplyGate(overlayRef.current);
         }
@@ -719,10 +737,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     }
 
     if (!bundle && voiceMatch) {
-      host.toast({
-        title: '🎙️ Voice-only clone',
-        message: 'This clone has no persona pack. Open Studio to finish style + voice before applying.'
-      });
+      notifyHost('warning', '🎙️ Voice-only clone', 'This clone has no persona pack. Open Studio to finish style + voice before applying.');
       setActiveId('default');
       return;
     }
@@ -791,12 +806,13 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     }
 
     const ttsLabel = providerLabel(boundProvider);
-    host.toast({
-      title: `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
-      message: applied
+    notifyHost(
+      applied ? 'success' : 'error',
+      `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
+      applied
         ? `Style + ${ttsLabel} voice on this chat — next reply picks it up. New Chat returns to stock.`
         : `Failed to apply speaking persona on "${profile}"`
-    });
+    );
 
     window.__ACTIVE_PERSONA_STUDIO__ = applied
       ? { ...bundle, apply_provider: boundProvider, apply_voice_id: boundVoiceId, apply_reason: resolveReason, scope: 'session' }
@@ -1156,14 +1172,19 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(plan.body)
       });
-      if (res.ok) {
-        const data = await res.json();
-        const saved = data.persona || {};
-        const strength = characterStrengthPercent(saved.character_strength != null ? saved.character_strength : plan.body.character_strength);
-        host.toast({
-          title: plan.method === 'PUT' ? 'Persona Updated' : 'Persona Saved',
-          message: `${saved.name || plan.body.name} — Character strength ${strength}%`
-        });
+      if (!res.ok) {
+        alert('Failed to save persona.');
+        return;
+      }
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_) {
+        data = {};
+      }
+      const saved = (data && data.persona) || {};
+      const strength = characterStrengthPercent(saved.character_strength != null ? saved.character_strength : plan.body.character_strength);
+      try {
         if (saved.id) {
           setEditingPackId(saved.id);
           setName(saved.name || plan.body.name);
@@ -1171,9 +1192,14 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
         }
         await loadStudioPacks();
         refreshPersonas?.();
-      } else {
-        alert('Failed to save persona.');
+      } catch (refreshErr) {
+        console.warn('[PersonaStudio] Post-save refresh failed:', refreshErr);
       }
+      notifyHost(
+        'success',
+        plan.method === 'PUT' ? 'Persona Updated' : 'Persona Saved',
+        `${saved.name || plan.body.name} — Character strength ${strength}%`
+      );
     } catch (e) {
       alert(`Error saving persona: ${e.message}`);
     }
@@ -1203,10 +1229,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
       if (res.ok && data.ok) {
         const bot = botProfiles.find(b => b.id === selectedBotProfile);
         const botTitle = bot ? bot.title : selectedBotProfile;
-        host.toast({
-          title: 'Voice Assigned to Bot',
-          message: `Assigned "${voiceName}" to Bot "${botTitle}"!`
-        });
+        notifyHost('success', 'Voice Assigned to Bot', `Assigned "${voiceName}" to Bot "${botTitle}"!`);
         setStatusMessage(`✓ Assigned "${voiceName}" to "${botTitle}"!`);
         const pRes = await fetch(`${API_BASE}/profiles`);
         if (pRes.ok) setBotProfiles(await pRes.json());

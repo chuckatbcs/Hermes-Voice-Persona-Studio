@@ -1385,6 +1385,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("plan.method", save)
         self.assertNotIn("onOpenChange(false)", save)
         self.assertNotIn("Please enter a name for the Persona.", save.split("plan.error")[0])
+        self.assertNotIn("host.toast", self.src)
+        self.assertIn("notifyHost", save)
+        self.assertIn("host.notify", self.src)
 
     def test_profile_switch_to_other_bot_is_not_user_new_chat(self):
         data = self._run_js(
@@ -1501,7 +1504,12 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               temperature: 0.7,
               characterStrength: 25
             });
-            console.log(JSON.stringify({ hydrated, unnamed, created, missing }));
+            const calls = [];
+            const notified = notifyHost('success', 'Persona Updated', 'Eric Cartman — Character strength 100%', {
+              notify: (payload) => calls.push(payload)
+            });
+            const noApi = notifyHost('info', 'Title', 'Message', {});
+            console.log(JSON.stringify({ hydrated, unnamed, created, missing, notified, calls, noApi }));
             """,
         )
         self.assertEqual(data["hydrated"]["name"], "Eric Cartman")
@@ -1514,6 +1522,11 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["created"]["method"], "POST")
         self.assertEqual(data["created"]["url"], "/personas")
         self.assertIn("error", data["missing"])
+        self.assertTrue(data["notified"])
+        self.assertEqual(data["calls"][0]["kind"], "success")
+        self.assertEqual(data["calls"][0]["title"], "Persona Updated")
+        self.assertIn("100%", data["calls"][0]["message"])
+        self.assertFalse(data["noApi"])
 
     def _run_js_helpers(self, helpers: str, body: str):
         import json
