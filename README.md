@@ -89,7 +89,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 ### 1. Launching the Studio
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **persona** applies LLM system text **and** a TTS voice to **this chat only**. New chats return to stock Hermes (**Edge / `en-US-AriaNeural`**, the Nous clean-install default — not Jarvis or a Studio clone). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only. Local **Voicebox / Qwen** remains an explicit `Name · Voicebox` choice.
+3. Picking a **persona** applies LLM system text **and** a TTS voice to **this chat only**. New chats return to stock Hermes (**Edge / `en-US-AriaNeural`**, the Nous clean-install default — not Jarvis or a Studio clone). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only. Local **Voicebox / Qwen** remains an explicit `Name · Voicebox` choice. Sending the first prompt must **not** open a second blank chat (the plugin ignores Hermes session-id persist and only restores stock Hermes when you click New Chat).
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).

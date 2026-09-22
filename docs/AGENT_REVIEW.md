@@ -69,7 +69,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Path | What changed |
 |---|---|
-| `desktop/plugin.js` | Unified apply through **session overlay** (stash + apply + watch next new chat). Clone **or** persona → ensure bundle → Fish-prefer `resolve-tts` → `POST .../session/apply` → `host.newChat` for *this* session only. Startup `POST /session/reset-all` (no auto-apply). Titlebar lists **Fish + Voicebox**. Poll 60s + focus refresh. |
+| `desktop/plugin.js` | Unified apply through **session overlay**. Watcher resets **only** on `focusedStoredSessionId` non-null → null (user New Chat) — not `focusedSessionId` churn. After that reset, **no** extra `host.newChat`. `applyInProgress` gates several seconds and refreshes session atoms. Apply skips newChat on blank drafts; one newChat remains for persisted sessions so `agent.system_prompt` reloads. Startup `POST /session/reset-all`. Titlebar lists **Fish + Voicebox**. Poll 60s + focus refresh. |
 | `backend/session_overlay.py` | **New.** `.studio-session.json` stashes pre-apply personality, **`agent.system_prompt`**, and TTS; restore on new session. Unusable stash / first-run stock → **edge / en-US-AriaNeural**. Never writes Voicebox `voice: default` or invents Jarvis as stock. Catalog personality dicts are not active. |
 | `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; Edge voice read from `tts.edge.voice`. |
 | `backend/api.py` | Clone returns `{voice, persona}`. `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
@@ -81,7 +81,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | `backend/storage.py` | Ignore hidden persona dirs / `.studio-managed.json` / `.studio-session.json`. |
 | `install.py` | Deploy `plugin.js` only; delete stray `plugin.py`; optional `--systemd`; default `--sync-voices`; uninstall stops unit; `--purge` reverts tracked keys and removes `personas/` (**never deletes `config.yaml`**). |
 | `seed_presets.py` | Portable storage root; do not clobber existing `prompt.md`; no in-place `PRESETS` mutation. |
-| `test_backend.py` | Offline tests for sync, Fish name-score, session stash/restore, Edge stock, no Voicebox `default`, surgical YAML, purge, install hygiene. |
+| `test_backend.py` | Offline tests for sync, Fish name-score, session stash/restore, Edge stock, no Voicebox `default`, surgical YAML, purge, install hygiene, **double-blank session-watch race**. |
 | `README.md` | Clone ≠ TTS-only; session vs sticky; Fish-prefer; uninstall vs purge. |
 | `docs/AGENT_REVIEW.md` | This file. |
 
@@ -103,11 +103,11 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Action | Disk | Hermes session |
 |---|---|---|
-| Titlebar pick persona | Stash `display.personality` + **`agent.system_prompt`** + TTS; overlay personality + session system_prompt + Fish-prefer TTS. Catalog dicts are not active by themselves | `host.newChat` so **this** chat picks up Cartman/Jarvis/KITT. Next **user** new chat restores stash — system_prompt must not stay KITT/Cartman |
-| Titlebar pick `Name · Fish` clone | Same session overlay; explicit Fish assign | Same apply `newChat`; not sticky |
-| Titlebar pick `Name · Voicebox` clone | Same session overlay; explicit local GPU (slow path; user-forced) | Same apply `newChat`; not sticky |
-| Titlebar Standard Hermes | Restore stash, or Edge stock if no usable stash. Never `voicebox.voice: default` | `newChat` after restore |
-| User New Chat while overlay active | Restore stash (or Edge stock); plugin watches `focusedSessionId` | New draft is stock Hermes (Edge Aria unless stash was a real pre-apply provider) |
+| Titlebar pick persona | Stash `display.personality` + **`agent.system_prompt`** + TTS; overlay personality + session system_prompt + Fish-prefer TTS. Catalog dicts are not active by themselves | **One** `host.newChat` only if this session is already persisted (prompt cache). Blank drafts skip it. First prompt must **not** open a second blank |
+| Titlebar pick `Name · Fish` clone | Same session overlay; explicit Fish assign | Same apply reload rule; not sticky |
+| Titlebar pick `Name · Voicebox` clone | Same session overlay; explicit local GPU (slow path; user-forced) | Same apply reload rule; not sticky |
+| Titlebar Standard Hermes | Restore stash, or Edge stock if no usable stash. Never `voicebox.voice: default` | `newChat` only if the current session is persisted |
+| User New Chat while overlay active | Restore stash (or Edge stock); plugin watches **`focusedStoredSessionId` non-null → null**, not `focusedSessionId` churn | **No** extra `newChat` — user already has the blank |
 | Plugin / Desktop startup | `POST /session/reset-all`: restore stash; leftover Studio personality cleared; Voicebox `voice: default` → Edge stock. No auto-apply | `newChat` only if a leftover overlay was actually restored |
 | Companion refresh | Same startup reset. Never auto-applies a Studio persona | — |
 | Studio Save Persona | Bundle under `personas/` | Not auto-applied until titlebar |
@@ -158,6 +158,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 2. **Dropdown apply is this session only.** Pick the **persona** row for Cartman (not `Cartman · Voicebox`).
    - Expect toast that prompt + **Fish** applied to **this chat**, and that the next new chat returns to stock Hermes.
    - This session should speak as Cartman. If a Fish twin exists (`Hermes eric_cartman` preferred over `Hermes cartman`), audio should land in about ≤5 seconds (Promax Fish baseline 2.5–3.4s).
+   - **Do not** get a second blank chat when sending the first prompt. `focusedSessionId` persist is not New Chat.
 3. **New chat again → stock Hermes.** Click New Chat. Send a short line.
    - Expect default Hermes text + **Edge / AriaNeural** again. Cartman overlay must be gone.
    - Repeat once with Jarvis and once with KITT if those persona rows exist (`Hermes jarvis` / `Hermes kitt` Fish names).
@@ -186,6 +187,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 - [ ] Persona apply prefers a Fish name-twin; `Name · Voicebox` remains an explicit local choice
 - [ ] `Eric Cartman` resolves `Hermes eric_cartman` over `Hermes cartman`; Jarvis/KITT match `Hermes jarvis` / `Hermes kitt`
 - [ ] New chat is stock Hermes **Edge / en-US-AriaNeural** with **empty `agent.system_prompt`**; dropdown apply is session-scoped; no auto-apply on startup
+- [ ] Session watcher resets overlay **only** on `focusedStoredSessionId` non-null → null; first-prompt `focusedSessionId` churn does **not** wipe or open a second blank; user New Chat does **not** call `host.newChat` again
 - [ ] Session reset never writes Voicebox `voice: default` or a Studio clone as stock
 - [ ] Clone API creates/updates a persona bundle
 - [ ] `POST /api/studio/sync-from-voices` is idempotent and does not downgrade Fish → Voicebox
@@ -239,8 +241,40 @@ Name matching for Fish twins (Promax catalog uses names like `Hermes jarvis`, `H
 
 When `~/.hermes/hermes-agent/utils.py::atomic_roundtrip_yaml_update` cannot be imported (missing ruamel, import collision, etc.), Studio still mutates **only** the dotted keys it owns, then atomically replaces the file via `yaml.safe_dump`. That preserves unrelated mapping keys and values but **can drop comments and original scalar quoting**. It is still strictly better than the previous “load entire doc, dump entire doc with no strategy tag or prior-value index,” and `--purge` can revert the keys Studio recorded.
 
-**Session overlay residual:** Hermes has no true session-scoped personality/TTS API. Apply still writes profile `config.yaml` for the duration of one chat, then restores. If the plugin is not loaded, a user-initiated New Chat will not restore the stash until the plugin mounts (startup `reset-all`). Opening a stored history session restores config without an extra `newChat`.
+**Session overlay residual:** Hermes has no true session-scoped personality/TTS API. Apply still writes profile `config.yaml` for the duration of one chat, then restores. If the plugin is not loaded, a user-initiated New Chat will not restore the stash until the plugin mounts (startup `reset-all`). Opening a stored history session restores config without an extra `newChat`. First-prompt `focusedSessionId` persist must not look like New Chat. Apply on a blank draft skips `host.newChat`; if Hermes had already cached stock `agent.system_prompt` for that draft, the first turn might still be stock text until a later session — persisted threads still get one reload newChat (see §11).
 
 **Silent TTS (Promax `20260922_094441_564b69`):** stock/reset wrote Voicebox `voice: default`. Command TTS used `--voice default`, 404'd a stale process-global active-voice UUID (`151b6710-8f59-4366-9410-0b3044ded982`), and played no audio. Reset must never emit that placeholder; first-run stock is Edge AriaNeural, not Voicebox Jarvis.
 
 **False “default session is KITT” (Promax mechanic retest):** empty `display.personality` + Edge Aria was not enough. Leftover `agent.system_prompt` (KITT) is injected every session. Reset must stash/restore that key (or `''`). Do not treat `agent.personalities.kitt` as active. Memory files mentioning “Active profile: kitt” can still bias replies until scrubbed outside this plugin.
+
+---
+
+## 11. Double-blank session race (Promax 2026-09-22)
+
+Companion log: dropdown `session/apply` then overlay **reset ~5–18s later** when the first user turn starts. Charles picked a persona (plugin called `host.newChat` after apply), sent the first prompt, and the plugin immediately opened **another** blank session.
+
+### Root cause
+
+`desktop/plugin.js` `onSessionChange` treated **any** `focusedSessionId` string change while `overlay.active` as user New Chat, then `resetSessionOverlay` and sometimes `host.newChat` again. Hermes **renumbers/persists** `focusedSessionId` on first prompt. `applyInProgress` was only **500ms**, so it had already expired → mid-turn wipe.
+
+`focusedStoredSessionId` is the durable signal: it goes **non-null → null/empty** when the user actually clicks New Chat. First-prompt persist does the opposite (null → stored id) or only churns `focusedSessionId`.
+
+### Required behavior (Mechanic Promax hotfix reconciled here)
+
+| Event | Overlay | Extra `host.newChat` |
+|---|---|---|
+| User New Chat (`focusedStoredSessionId` non-null → null/empty) | Reset to stock Hermes | **No** — user already has the blank chat |
+| First prompt persist (`focusedSessionId` churn; stored id null → uuid) | Keep speaking persona | **No** |
+| Apply gate in progress (apply + optional one newChat, several seconds) | Refresh `sessionId` / `storedId`; do not reset | Only the optional apply reload below |
+| Dropdown apply on a **blank draft** (no stored id) | Write overlay; keep this draft | **No** — yaml is current for the first turn |
+| Dropdown apply on a **persisted** session | Write overlay | **One** `host.newChat` so Hermes reloads `agent.system_prompt` (injected at session start; no session-scoped API) |
+
+`applyInProgress` stays true for `APPLY_GATE_MS` (**8000ms**, not 500ms) across apply + that optional one newChat, and the watcher **refreshes** `sessionId`/`storedId` while gated so apply’s own newChat (stored id S1 → null) is not mistaken for user New Chat.
+
+Do **not** regress to “any `focusedSessionId` change while overlay.active ⇒ New Chat”.
+
+### Why one newChat after apply can still happen
+
+Hermes injects `agent.system_prompt` when a session starts. Overlay writes `config.yaml` after that. If the user is already in a **persisted** thread, skipping newChat would leave stock/cached prompt on the current history. Blank drafts skip newChat so picking a persona does not stack chats. Items (1)–(3) above still prevent the second blank when the first prompt persists the session.
+
+Offline coverage: `TestPluginSessionWatchRace` in `test_backend.py` executes the JS helpers via `node` and asserts the watcher body never calls `startNewChat` after user New Chat.

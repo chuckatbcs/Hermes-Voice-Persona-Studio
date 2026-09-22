@@ -721,6 +721,155 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(data["tts"]["provider"], "edge")
 
 
+class TestPluginSessionWatchRace(unittest.TestCase):
+    """Promax double-blank race: first-prompt focusedSessionId churn is not New Chat."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plugin_path = Path(__file__).resolve().parent / "desktop" / "plugin.js"
+        cls.src = cls.plugin_path.read_text(encoding="utf-8")
+        start = cls.src.index("// SESSION_WATCH_BEGIN")
+        end = cls.src.index("// SESSION_WATCH_END")
+        cls.helpers = cls.src[start:end]
+
+    def _run_js(self, body: str):
+        import json
+        import subprocess
+        import tempfile
+
+        script = (
+            self.helpers
+            + "\n"
+            + body
+            + "\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            path = handle.name
+        try:
+            result = subprocess.run(
+                ["node", path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"node failed: {result.stderr or result.stdout}",
+        )
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_apply_gate_is_several_seconds(self):
+        import re
+
+        match = re.search(r"const APPLY_GATE_MS = (\d+)", self.src)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)), 5000)
+
+    def test_watcher_does_not_call_newchat_after_user_new_chat(self):
+        start = self.src.index("const onSessionChange = async () => {")
+        end = self.src.index("return subscribeFocusedSession(onSessionChange);")
+        watcher = self.src[start:end]
+        self.assertIn("decideSessionWatchTick", watcher)
+        self.assertIn("reset-stock", watcher)
+        self.assertNotIn("startNewChat", watcher)
+        self.assertIn("Do not call host.newChat again", watcher)
+
+    def test_old_focused_session_id_churn_trigger_is_gone(self):
+        start = self.src.index("const onSessionChange = async () => {")
+        end = self.src.index("return subscribeFocusedSession(onSessionChange);")
+        watcher = self.src[start:end]
+        self.assertNotIn("sid === overlay.sessionId", watcher)
+        self.assertNotIn("if (!sid || sid === overlay.sessionId) return;", watcher)
+        self.assertNotIn("setTimeout(() => { overlayRef.current.applyInProgress = false; }, 500)", self.src)
+
+    def test_first_prompt_persist_does_not_reset(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, sessionId: 'ephemeral-1', storedId: null, applyInProgress: false };
+            const decision = decideSessionWatchTick(overlay, 'persisted-uuid-2', 'stored-abc');
+            console.log(JSON.stringify({
+              action: decision.action,
+              callNewChat: decision.callNewChat,
+              userNewChat: isUserNewChatTransition(overlay.storedId, 'stored-abc')
+            }));
+            """
+        )
+        self.assertEqual(data["action"], "track")
+        self.assertFalse(data["callNewChat"])
+        self.assertFalse(data["userNewChat"])
+
+    def test_session_id_string_churn_alone_does_not_reset(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, sessionId: 'ephemeral-1', storedId: null, applyInProgress: false };
+            const decision = decideSessionWatchTick(overlay, 'ephemeral-renumbered', null);
+            console.log(JSON.stringify(decision));
+            """
+        )
+        self.assertEqual(data["action"], "track")
+        self.assertFalse(data["callNewChat"])
+
+    def test_user_new_chat_resets_without_newchat(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, sessionId: 'sess-2', storedId: 'stored-abc', applyInProgress: false };
+            const decision = decideSessionWatchTick(overlay, 'ephemeral-blank', null);
+            console.log(JSON.stringify(decision));
+            """
+        )
+        self.assertEqual(data["action"], "reset-stock")
+        self.assertFalse(data["callNewChat"])
+        self.assertEqual(data["overlayPatch"]["active"], False)
+        self.assertIsNone(data["overlayPatch"]["storedId"])
+
+    def test_empty_string_stored_id_is_user_new_chat(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, sessionId: 'sess-2', storedId: 'stored-abc', applyInProgress: false };
+            const decision = decideSessionWatchTick(overlay, 'ephemeral-blank', '');
+            console.log(JSON.stringify({
+              action: decision.action,
+              callNewChat: decision.callNewChat,
+              isTransition: isUserNewChatTransition('stored-abc', '')
+            }));
+            """
+        )
+        self.assertTrue(data["isTransition"])
+        self.assertEqual(data["action"], "reset-stock")
+        self.assertFalse(data["callNewChat"])
+
+    def test_apply_gate_swallows_newchat_stored_transition(self):
+        data = self._run_js(
+            """
+            const overlay = { active: true, sessionId: 'old', storedId: 'stored-abc', applyInProgress: true };
+            const decision = decideSessionWatchTick(overlay, 'ephemeral-blank', null);
+            console.log(JSON.stringify(decision));
+            """
+        )
+        self.assertEqual(data["action"], "gate-refresh")
+        self.assertFalse(data["callNewChat"])
+        self.assertIsNone(data["overlayPatch"]["storedId"])
+        self.assertEqual(data["overlayPatch"]["sessionId"], "ephemeral-blank")
+
+    def test_reload_after_apply_only_when_session_is_persisted(self):
+        data = self._run_js(
+            """
+            console.log(JSON.stringify({
+              blank: shouldReloadSessionAfterApply(null),
+              empty: shouldReloadSessionAfterApply(''),
+              persisted: shouldReloadSessionAfterApply('stored-abc')
+            }));
+            """
+        )
+        self.assertFalse(data["blank"])
+        self.assertFalse(data["empty"])
+        self.assertTrue(data["persisted"])
+
+
 class TestInstallHygiene(IsolatedHermesHomeTest):
     def test_deploy_plugin_copies_js_and_removes_plugin_py(self):
         src = Path(self.temp_dir) / "src"

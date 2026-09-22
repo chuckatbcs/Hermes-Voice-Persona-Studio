@@ -192,13 +192,27 @@ function focusedStoredSessionId() {
   }
 }
 
-function subscribeFocusedSession(onChange) {
+function subscribeAtom(atom, onChange) {
   try {
-    const atom = host.state && host.state.focusedSessionId;
     if (atom && typeof atom.subscribe === 'function') {
       return atom.subscribe(() => onChange());
     }
   } catch (_) {}
+  return null;
+}
+
+function subscribeFocusedSession(onChange) {
+  const unsubs = [];
+  try {
+    const state = host.state || {};
+    const sidUnsub = subscribeAtom(state.focusedSessionId, onChange);
+    const storedUnsub = subscribeAtom(state.focusedStoredSessionId, onChange);
+    if (sidUnsub) unsubs.push(sidUnsub);
+    if (storedUnsub) unsubs.push(storedUnsub);
+  } catch (_) {}
+  if (unsubs.length) {
+    return () => unsubs.forEach((u) => { try { if (typeof u === 'function') u(); } catch (_) {} });
+  }
   const timer = setInterval(onChange, 400);
   return () => clearInterval(timer);
 }
@@ -209,6 +223,96 @@ async function startNewChat(profile) {
     await host.newChat(profile);
   } catch (err) {
     console.warn('[PersonaStudio] host.newChat failed:', err);
+  }
+}
+
+// SESSION_WATCH_BEGIN
+/**
+ * Promax double-blank race (Charles 2026-09-22):
+ * Hermes persists/renumbers focusedSessionId on the first prompt (~5–18s after
+ * apply). The old watcher treated ANY focusedSessionId change while overlay.active
+ * as New Chat, then resetSessionOverlay + sometimes host.newChat again.
+ *
+ * Rules (Mechanic Promax hotfix reconciled here — do not regress):
+ * 1. Reset overlay ONLY on focusedStoredSessionId non-null → null/empty (user New Chat).
+ *    Ignore focusedSessionId string churn (first-prompt persist).
+ * 2. After that reset, do NOT call host.newChat (user already has the blank chat).
+ * 3. applyInProgress stays true across apply + optional one newChat until session
+ *    atoms settle (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
+ * 4. One host.newChat after apply is still required when the current session is
+ *    already persisted: Hermes injects agent.system_prompt at session start, so
+ *    config.yaml overlay would not reload mid-thread. Blank drafts skip newChat
+ *    (no stored id) so apply does not stack a second empty chat.
+ */
+const APPLY_GATE_MS = 8000;
+
+function isEmptySessionId(id) {
+  if (id == null) return true;
+  const text = String(id).trim();
+  return text === '' || text === 'null' || text === 'undefined';
+}
+
+function isUserNewChatTransition(prevStored, nextStored) {
+  return !isEmptySessionId(prevStored) && isEmptySessionId(nextStored);
+}
+
+function shouldReloadSessionAfterApply(storedId) {
+  return !isEmptySessionId(storedId);
+}
+
+function decideSessionWatchTick(overlay, nextSessionId, nextStoredId) {
+  const sessionId = isEmptySessionId(nextSessionId) ? null : nextSessionId;
+  const storedId = isEmptySessionId(nextStoredId) ? null : nextStoredId;
+  if (overlay && overlay.applyInProgress) {
+    return {
+      action: 'gate-refresh',
+      overlayPatch: { sessionId, storedId },
+      callNewChat: false
+    };
+  }
+  if (overlay && overlay.active && isUserNewChatTransition(overlay.storedId, storedId)) {
+    return {
+      action: 'reset-stock',
+      overlayPatch: { active: false, sessionId, storedId, applyInProgress: false },
+      callNewChat: false
+    };
+  }
+  return {
+    action: 'track',
+    overlayPatch: { sessionId, storedId },
+    callNewChat: false
+  };
+}
+// SESSION_WATCH_END
+
+function emptyOverlayState(extra) {
+  return Object.assign({
+    active: false,
+    sessionId: null,
+    storedId: null,
+    applyInProgress: false,
+    applyGateTimer: null
+  }, extra || {});
+}
+
+function beginApplyGate(overlay) {
+  overlay.applyInProgress = true;
+  if (overlay.applyGateTimer) {
+    try { clearTimeout(overlay.applyGateTimer); } catch (_) {}
+  }
+  overlay.applyGateTimer = setTimeout(() => {
+    overlay.applyInProgress = false;
+    overlay.applyGateTimer = null;
+    overlay.sessionId = focusedSessionId();
+    overlay.storedId = focusedStoredSessionId();
+  }, APPLY_GATE_MS);
+}
+
+function clearApplyGate(overlay) {
+  overlay.applyInProgress = false;
+  if (overlay.applyGateTimer) {
+    try { clearTimeout(overlay.applyGateTimer); } catch (_) {}
+    overlay.applyGateTimer = null;
   }
 }
 
@@ -327,7 +431,7 @@ function PersonaStudioRoot() {
 // ── Titlebar Persona Picker Component ─────────────────────────────────────
 function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, refreshVoices }) {
   const [activeId, setActiveId] = useState('default');
-  const overlayRef = useRef({ active: false, sessionId: null, applyInProgress: false });
+  const overlayRef = useRef(emptyOverlayState());
 
   useEffect(() => {
     let cancelled = false;
@@ -343,36 +447,34 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
         console.warn('[PersonaStudio] startup session reset-all failed:', err);
       }
       if (cancelled) return;
-      overlayRef.current = { active: false, sessionId: null, applyInProgress: false };
+      overlayRef.current = emptyOverlayState({
+        sessionId: focusedSessionId(),
+        storedId: focusedStoredSessionId()
+      });
       setActiveId('default');
       window.__ACTIVE_PERSONA_STUDIO__ = null;
       if (restored) {
         await startNewChat(focusedProfile());
+        overlayRef.current.sessionId = focusedSessionId();
+        overlayRef.current.storedId = focusedStoredSessionId();
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
+    overlayRef.current.sessionId = focusedSessionId();
+    overlayRef.current.storedId = focusedStoredSessionId();
     const onSessionChange = async () => {
       const overlay = overlayRef.current;
-      if (overlay.applyInProgress) {
-        overlay.sessionId = focusedSessionId();
-        return;
-      }
-      if (!overlay.active) return;
-      const sid = focusedSessionId();
-      if (!sid || sid === overlay.sessionId) return;
-      const stored = focusedStoredSessionId();
-      overlay.active = false;
-      overlay.sessionId = null;
+      const decision = decideSessionWatchTick(overlay, focusedSessionId(), focusedStoredSessionId());
+      Object.assign(overlay, decision.overlayPatch);
+      if (decision.action !== 'reset-stock') return;
       setActiveId('default');
       window.__ACTIVE_PERSONA_STUDIO__ = null;
       const profile = focusedProfile();
       const ok = await resetSessionOverlay(profile);
-      if (ok && !stored) {
-        await startNewChat(profile);
-      }
+      // User already has the blank New Chat. Do not call host.newChat again.
       if (ok) {
         host.toast({
           title: '🤖 Standard Hermes',
@@ -401,21 +503,27 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       : (selection.kind === 'legacy' ? voices.find(v => v.id === selection.id) : null);
 
     if (selection.kind === 'default' || id === 'default') {
-      overlayRef.current.applyInProgress = true;
+      beginApplyGate(overlayRef.current);
       try {
         const ok = await resetSessionOverlay(profile);
         if (ok) {
-          await startNewChat(profile);
-          overlayRef.current = { active: false, sessionId: focusedSessionId(), applyInProgress: false };
+          const storedBeforeReload = focusedStoredSessionId();
+          if (shouldReloadSessionAfterApply(storedBeforeReload)) {
+            await startNewChat(profile);
+          }
+          overlayRef.current.active = false;
+          overlayRef.current.sessionId = focusedSessionId();
+          overlayRef.current.storedId = focusedStoredSessionId();
           host.toast({
             title: '🤖 Standard Hermes',
             message: `This session uses stock Hermes on "${profile}"`
           });
+        } else {
+          clearApplyGate(overlayRef.current);
         }
       } catch (e) {
         console.warn('[PersonaStudio] Failed to clear persona:', e);
-      } finally {
-        overlayRef.current.applyInProgress = false;
+        clearApplyGate(overlayRef.current);
       }
       window.__ACTIVE_PERSONA_STUDIO__ = null;
       return;
@@ -486,7 +594,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       console.warn('[PersonaStudio] TTS resolve error, using bundle voice:', e);
     }
 
-    overlayRef.current.applyInProgress = true;
+    beginApplyGate(overlayRef.current);
     let applied = false;
     try {
       const applyRes = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/session/apply`, {
@@ -503,16 +611,22 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       });
       applied = applyRes.ok;
       if (applyRes.ok) {
-        await startNewChat(profile);
+        const storedBeforeReload = focusedStoredSessionId();
+        if (shouldReloadSessionAfterApply(storedBeforeReload)) {
+          // Persisted session already cached stock system_prompt; one newChat
+          // reloads overlay. Blank drafts skip this so apply does not stack chats.
+          await startNewChat(profile);
+        }
         overlayRef.current.active = true;
         overlayRef.current.sessionId = focusedSessionId();
+        overlayRef.current.storedId = focusedStoredSessionId();
       } else {
         console.warn('[PersonaStudio] Session apply failed');
+        clearApplyGate(overlayRef.current);
       }
     } catch (e) {
       console.warn('[PersonaStudio] Session apply error:', e);
-    } finally {
-      setTimeout(() => { overlayRef.current.applyInProgress = false; }, 500);
+      clearApplyGate(overlayRef.current);
     }
 
     const ttsLabel = providerLabel(boundProvider);
