@@ -30,9 +30,9 @@ Powered seamlessly by **Fish Audio Cloud** and **Local GPU Neural TTS (Voicebox)
 * **Re-sample on Demand**: Refresh an existing voice profile with newer, clearer studio audio without breaking downstream bot associations.
 * **1-Click Deletion**: Safely prune outdated or duplicate clones from both local storage and cloud APIs.
 
-### 🤖 1-Click Bot & Profile Voice Assignment
-* Directly assign any cloned voice to your Hermes bots (`PC Maintainence / mechanic`, `Research Agent / magellan`, `critic`, `default`) with a single click.
-* **Hermes Group Chat Ready**: When participating in multi-bot group chats (like `Promax Group`), each bot automatically responds with its distinct cloned voice when addressed via `@mention` or round-robin debate.
+### 🤖 Assign voice to bot (TTS keys only)
+* **Assign voice to bot** writes that Hermes profile’s TTS keys (Fish or Voicebox). It is not session **Apply to this chat**.
+* Desktop group rooms do **not** yet play audio. There is no Read aloud / Speak replies control in the room UI. Assign does not make `@mention` or round-robin debate speak.
 
 ### 🛡️ 100% Non-Destructive
 * Zero edits to the upstream Hermes agent repository (`~/.hermes/hermes-agent` stays a clean git checkout).
@@ -86,36 +86,38 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 
 ## 📖 User Guide
 
-### 1. Launching the Studio
+Peer-review notes for this release: [`docs/AGENT_REVIEW.md`](docs/AGENT_REVIEW.md).
+
+### 1. Titlebar and Studio
 1. Open **Hermes Desktop**.
-2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** — it does **not** start a new session. **Character strength (0–100%)** on the pack: **0%** = profile SOUL / AGENTS.md only (no style overlay); **100%** = the character **eclipses** SOUL for this session; mid values blend. This is **not** TTS Temperature / Expressiveness. The titlebar lists only packs with a non-stub prompt and a usable cloned voice; voice-only clones stay in Studio. Switching bots (mechanic → Magellan) resets the titlebar to that profile’s stock unless **that** profile has its own overlay. **New Chat** returns to that profile’s stock identity and **Edge / `en-US-AriaNeural`** (or the stashed profile TTS). If a **Fish Audio** clone matches the persona name, Studio binds Fish for that session only.
-4. **Studio workflow (top → bottom):** **Target profile** (focused Hermes bot) → **Choose persona** (pack + Fish Audio (cloud) vs Voicebox (local GPU) + voice) → **Character strength** 0–100% → primary **Apply to this chat** → **Current applied state**. Selecting Cartman fills the form; **Save pack** **updates** that pack (`PUT /personas/{id}`) including Character strength 100%. Empty name uses the selected pack name. Studio stays open after save. **New** still **POST**s a new pack. Preview / Reset / clone / group-chat bind stay secondary.
+2. In the chat header, use **`🎭 Personas`** or **`🎙️ Studio`**.
+3. A **complete persona pack** overlays **speaking style + cloned TTS** on **this chat** (no new session). **Character strength (0–100%)**: **0%** = profile SOUL / AGENTS.md only; **100%** = character eclipses SOUL for this session; mid values blend. This is **not** TTS Temperature. The titlebar lists complete packs only; voice-only clones stay in Studio. Switching bots resets the titlebar to that profile’s stock unless **that** profile has its own overlay. **New Chat** returns to stock identity + **Edge / `en-US-AriaNeural`** (or stashed profile TTS).
+4. **Studio (top → bottom):** **Target profile** → **Choose persona** (**Fish Audio (cloud)** vs **Voicebox (local GPU)** + voice labeled `· Fish` / `· Voicebox`) → **Character strength** → primary **Apply to this chat** → **Current applied state**. Selecting a pack hydrates the form. **Save pack** updates it (`PUT /personas/{id}`); **New** still POSTs. Preview voice / Reset to stock Hermes / clone stay secondary.
 
-### 2. Auditioning Voices
-1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
-2. Choose a voice from the dropdown. For near-zero latency on local GPUs, select **`Qwen 3 (0.6B - ⚡ Instant ~0.4s Lag)`**.
-3. Type any text in the preview box and click **`▶ Audition`**.
-4. Adjust **Speed** and **Temperature / Expressiveness (TTS only)** for audition. Use **Character strength (LLM) 0–100%** — 0% = profile soul only, 100% = character replaces soul for this session. Temperature does **not** change how in-character the text replies are.
+### 2. Preview a voice
+1. Under **Choose persona**, pick **Fish Audio (cloud)** or **Voicebox (local GPU)**.
+2. Choose a voice (`Name · Fish` or `Name · Voicebox`).
+3. In **Voice preview & TTS**, enter **Preview text** and click **Preview voice**.
+4. **Speed (TTS)** and **Temperature / Expressiveness (TTS only)** affect audition only. Character strength is how in-character the text replies are.
 
-### 3. Assigning a Voice to a Bot for Group Chats
-1. In the Studio dialog, locate the quieter **Group-chat voice bind** section.
-2. Select the target bot from the dropdown (e.g., `PC Maintainence (mechanic)`, `Research Agent (magellan)`, `critic`, etc.).
-3. Click **`Assign voice to bot`**.
-4. That bot's profile is updated immediately. When chatting in a Group Chat, mention `@botname` and it will speak with its individual cloned voice!
+### 3. Assign voice to bot (TTS keys only)
+1. Scroll to the quieter **Group-chat voice bind** section.
+2. Select the Hermes bot / profile (e.g. mechanic, magellan, critic).
+3. Click **Assign voice to bot**.
+4. That writes the profile’s TTS keys. Desktop group rooms do **not** play audio today (no Read aloud / Speak replies). This is not **Apply to this chat**.
 
-### 4. Cloning a New Voice
-1. Under **Zero-Shot Voice Cloning**, enter a voice name.
-2. Select your base engine model.
-3. Choose a reference audio sample (`.wav`, `.mp3`, `.m4a`).
-4. Click **`🎙️ Clone Voice & Register`**.
-5. Studio registers the TTS clone **and** writes `~/.hermes/personas/<slug>/` (mannerism overlay from the clone description, not a full “You are {name}…” identity). Use **Save Persona** if you want a custom prompt/avatar; use the titlebar to apply **style + voice** to the **current chat** (no new session). **New Chat** returns to profile stock.
+### 4. Clone a new voice
+1. Under **Clone a new voice**, enter **New cloned voice name**.
+2. Pick **Target engine / model**.
+3. Choose a **Reference audio sample** (`.wav`, `.mp3`, `.m4a`).
+4. Click **Upload & clone to Fish Audio** or **Upload & clone to Voicebox**.
+5. Studio registers the clone **and** writes `~/.hermes/personas/<slug>/` (mannerisms, not a full “You are {name}…” identity). Use **Save pack** for a custom prompt; use **Apply to this chat** or the titlebar to overlay the current session.
 
-### 5. Managing Duplicates & Re-sampling
-1. Click **`[ ⚙️ Manage ]`** next to the voice selector.
-2. Filter through your cloned models.
-3. Click **`🎙️ Re-sample`** to upload a newer, higher-quality audio file to that voice ID.
-4. Click **`🗑️ Delete`** to permanently remove duplicate voices.
+### 5. Manage voices
+1. Click **Manage voices** next to the voice selector.
+2. Filter by name.
+3. **Re-sample** uploads newer reference audio to that voice ID.
+4. **Delete** removes the clone from the selected provider.
 
 ---
 
