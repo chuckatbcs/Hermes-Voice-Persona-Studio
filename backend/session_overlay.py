@@ -1,17 +1,21 @@
-"""Session-scoped speaking-persona overlays on top of profile config.yaml.
+"""Session-scoped speaking-style + TTS overlays on top of profile config.yaml.
 
-Hermes Desktop has no session-scoped personality / TTS API. The only overlay
-Hermes honors is ``display.personality`` plus ``tts.*`` in the profile config,
-cached when a chat starts. Dropdown apply therefore:
+Hermes Desktop has no session-scoped personality / TTS API. Overlay is
+``display.personality`` (ephemeral style) plus ``tts.*``, not a replacement
+of the profile's SOUL.md / AGENTS.md identity.
 
-1. Stashes the pre-apply personality + TTS selection.
-2. Writes the overlay so *this* chat (refreshed via ``host.newChat``) can speak
-   as the chosen persona.
+Dropdown apply therefore:
+
+1. Stashes the pre-apply ``display.personality``, user-owned
+   ``agent.system_prompt``, and TTS selection.
+2. Writes a Studio-managed catalog entry whose ``system_prompt`` is a
+   **speaking-style overlay** (mannerisms, not ``You are X`` identity) and
+   selects it via ``display.personality``. Binds Fish-prefer TTS. Does **not**
+   clobber user ``agent.system_prompt`` with character identity.
 3. Restores the stash on the next user-initiated new session. Unusable stash
    (missing, Voicebox ``default``) falls back to Nous stock TTS:
    ``tts.provider: edge`` + ``tts.edge.voice: en-US-AriaNeural``.
-   Restores ``agent.system_prompt`` to the stashed value or ``''`` — leftover
-   KITT/Cartman text must not survive a new-chat reset.
+   Restores ``agent.system_prompt`` to the stashed user value or ``''``.
 
 This module never patches ``~/.hermes/hermes-agent``.
 """
@@ -25,6 +29,11 @@ from . import bot_profiles
 from .config_io import get_dotted, load_yaml, snapshot_values, update_config_keys
 from .managed_index import SOURCE_TAG, remember_writes
 from .paths import config_path_for_profile, session_state_path
+from .persona_sync import (
+    STYLE_OVERLAY_MARKER,
+    build_style_overlay_prompt,
+    is_style_overlay_prompt,
+)
 
 STASH_KEYS = (
     "display.personality",
@@ -161,12 +170,30 @@ def _stash_restore_updates(stash: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     return updates
 
 
+def _is_studio_injected_prompt(cfg: Dict[str, Any], prompt: str) -> bool:
+    """True when *prompt* is a Studio catalog overlay, not a user-owned soul."""
+    text = str(prompt or "").strip()
+    if not text:
+        return False
+    if is_style_overlay_prompt(text) or STYLE_OVERLAY_MARKER.lower() in text.lower():
+        return True
+    personalities = get_dotted(cfg, "agent.personalities") or {}
+    if not isinstance(personalities, dict):
+        return False
+    for val in personalities.values():
+        if not isinstance(val, dict) or val.get("source") != SOURCE_TAG:
+            continue
+        stored = str(val.get("system_prompt") or "").strip()
+        if stored and stored == text:
+            return True
+    return False
+
+
 def _clear_studio_personality_selection(cfg_path: Path) -> bool:
     """Clear a Studio-tagged display.personality. Catalog dicts stay put.
 
     ``agent.personalities.<name>`` entries are not themselves active; only
-    ``display.personality`` (and ``agent.system_prompt`` for this session)
-    select them.
+    ``display.personality`` selects them as an ephemeral style overlay.
     """
     if not cfg_path.exists():
         return False
@@ -186,27 +213,19 @@ def _stock_system_prompt_update() -> Dict[str, Any]:
 
 
 def _clear_studio_injected_system_prompt(cfg_path: Path) -> bool:
-    """Clear agent.system_prompt when it matches a Studio-tagged catalog prompt.
+    """Clear leftover Studio text from user-owned ``agent.system_prompt``.
 
-    Catalog ``agent.personalities.*`` dicts are left in place (not active).
+    Catalog ``agent.personalities.*`` dicts stay (not active unless selected).
+    User-owned prompts that do not match a Studio overlay are left alone.
     """
     if not cfg_path.exists():
         return False
     cfg = load_yaml(cfg_path)
     prompt = str(get_dotted(cfg, "agent.system_prompt") or "").strip()
-    if not prompt:
+    if not _is_studio_injected_prompt(cfg, prompt):
         return False
-    personalities = get_dotted(cfg, "agent.personalities") or {}
-    if not isinstance(personalities, dict):
-        return False
-    for val in personalities.values():
-        if not isinstance(val, dict) or val.get("source") != SOURCE_TAG:
-            continue
-        stored = str(val.get("system_prompt") or "").strip()
-        if stored and stored == prompt:
-            update_config_keys(cfg_path, _stock_system_prompt_update())
-            return True
-    return False
+    update_config_keys(cfg_path, _stock_system_prompt_update())
+    return True
 
 
 def apply_session_overlay(
@@ -220,7 +239,7 @@ def apply_session_overlay(
     cfg_path: Optional[Path] = None,
     state_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Stash stock settings (once) and apply persona + TTS for this session."""
+    """Stash stock settings (once) and apply style overlay + TTS for this session."""
     path = cfg_path or config_path_for_profile(profile_id)
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found for profile '{profile_id}' at {path}")
@@ -229,20 +248,29 @@ def apply_session_overlay(
     profiles = state.setdefault("profiles", {})
     entry = profiles.get(profile_id) or {}
     if not entry.get("active") or not isinstance(entry.get("stash"), dict):
+        stash = snapshot_values(path, STASH_KEYS)
+        cfg_for_stash = load_yaml(path)
+        stashed_prompt = str(stash.get("agent.system_prompt") or "")
+        if _is_studio_injected_prompt(cfg_for_stash, stashed_prompt):
+            stash["agent.system_prompt"] = ""
         entry = {
             "active": False,
             "applied_persona": "",
-            "stash": snapshot_values(path, STASH_KEYS),
+            "stash": stash,
         }
 
+    style_overlay = build_style_overlay_prompt(persona_name, persona_prompt)
     persona_result = bot_profiles.set_profile_persona(
         profile_id,
         persona_name,
-        persona_prompt,
+        style_overlay,
         cfg_path=path,
     )
-    remember_writes(profile_id, path, ["agent.system_prompt"])
-    update_config_keys(path, {"agent.system_prompt": persona_prompt or ""})
+    cfg_live = load_yaml(path)
+    live_prompt = str(get_dotted(cfg_live, "agent.system_prompt") or "")
+    if _is_studio_injected_prompt(cfg_live, live_prompt):
+        remember_writes(profile_id, path, ["agent.system_prompt"])
+        update_config_keys(path, _stock_system_prompt_update())
     voice_result = None
     if voice_id and voice_id != "default":
         voice_result = bot_profiles.assign_voice_to_profile(
@@ -266,9 +294,11 @@ def apply_session_overlay(
         "provider": (voice_result or {}).get("provider"),
         "voice": (voice_result or {}).get("voice"),
         "write_strategy": persona_result.get("write_strategy"),
+        "style_overlay": style_overlay,
+        "touched_system_prompt": False,
         "message": (
-            f"Persona '{persona_name}' applied to this session on '{profile_id}'. "
-            "The next new chat returns to stock Hermes."
+            f"Speaking style '{persona_name}' applied to this session on '{profile_id}'. "
+            "Profile soul/job stay primary. The next new chat returns to stock Hermes."
         ),
     }
 
@@ -298,8 +328,8 @@ def reset_session_overlay(
         leftover_cleared = _clear_studio_injected_system_prompt(path) or leftover_cleared
         cfg = load_yaml(path)
         stock = _hermes_stock_tts_updates(cfg)
-        stock.update(_stock_system_prompt_update())
-        update_config_keys(path, stock)
+        if stock:
+            update_config_keys(path, stock)
         restored_keys = list(stock.keys())
 
     if profile_id in (state.get("profiles") or {}):

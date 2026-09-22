@@ -42,14 +42,34 @@ function isGenericVoiceDescription(description) {
   );
 }
 
+function mannerismFromPrompt(raw, personaName) {
+  const label = (personaName || 'this persona').trim() || 'this persona';
+  const text = (raw || '').trim();
+  if (!text) {
+    return `distinctive tone, vocabulary, and cadence associated with ${label}`;
+  }
+  const identity = /^\s*(?:you are|you're|i am|i'm)\s+(?:an?\s+)?(.+)$/i;
+  const parts = text.split(/(?<=[.!?])\s+/);
+  const first = (parts[0] || '').trim();
+  const rest = parts.slice(1).join(' ').trim();
+  const match = first.replace(/[.!?]+$/, '').match(identity);
+  let rewritten = first;
+  if (match) {
+    let leftover = match[1].trim();
+    leftover = leftover.replace(new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b[\\s,:-]*', 'i'), '').trim();
+    leftover = leftover.replace(/^from\s+[^,.:]+[,.:]?\s*/i, '').trim();
+    rewritten = leftover ? `mannerisms of ${label}: ${leftover}` : `mannerisms of ${label}`;
+  }
+  return rest ? `${rewritten}. ${rest}` : rewritten;
+}
+
 function fallbackSystemPrompt(name, description) {
   const label = (name || 'this persona').trim() || 'this persona';
   const desc = (description || '').trim();
   if (desc && !isGenericVoiceDescription(desc)) {
-    if (desc.toLowerCase().includes('you are') || desc.length >= 40) return desc;
-    return `You are ${label}. ${desc} Stay in character while remaining helpful and answering the user's questions.`;
+    return mannerismFromPrompt(desc, label);
   }
-  return `You are ${label}. Stay in character while remaining helpful and answering the user's questions.`;
+  return `distinctive tone, vocabulary, and cadence associated with ${label}; stay helpful and complete the profile's job`;
 }
 
 function slugifyName(value) {
@@ -240,7 +260,7 @@ async function startNewChat(profile) {
  * 3. applyInProgress stays true across apply + optional one newChat until session
  *    atoms settle (APPLY_GATE_MS), refreshing sessionId/storedId while gated.
  * 4. One host.newChat after apply is still required when the current session is
- *    already persisted: Hermes injects agent.system_prompt at session start, so
+ *    already persisted: Hermes injects personality overlays at session start, so
  *    config.yaml overlay would not reload mid-thread. Blank drafts skip newChat
  *    (no stored id) so apply does not stack a second empty chat.
  */
@@ -633,7 +653,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
     host.toast({
       title: `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
       message: applied
-        ? `Prompt + ${ttsLabel} voice applied to this chat. Next new chat returns to stock Hermes.`
+        ? `Style + ${ttsLabel} voice overlaid on this profile's soul. Next new chat returns to stock.`
         : `Failed to apply speaking persona on "${profile}"`
     });
 

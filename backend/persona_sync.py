@@ -103,19 +103,95 @@ def is_generic_voice_description(description: Optional[str]) -> bool:
     return False
 
 
+STYLE_OVERLAY_MARKER = "SPEAKING STYLE OVERLAY"
+
+_IDENTITY_SENTENCE = re.compile(
+    r"^\s*(?:you are|you['’]re|i am|i['’]m)\s+(?:an?\s+)?(.+)$",
+    re.IGNORECASE,
+)
+_IDENTITY_PREFIX = re.compile(
+    r"^\s*(?:you are|you['’]re|i am|i['’]m)\b[^.!?\n]*[.!?]?\s*",
+    re.IGNORECASE,
+)
+
+
+def _drop_leading_name(rest: str, persona_name: str) -> str:
+    label = (persona_name or "").strip()
+    if not label:
+        return rest.strip()
+    cleaned = re.sub(
+        r"^" + re.escape(label) + r"\b[\s,:-]*",
+        "",
+        rest.strip(),
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(r"^from\s+[^,.:]+[,.:]?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
+
+
+def mannerism_from_prompt(raw: Optional[str], persona_name: str) -> str:
+    """Rewrite bundle prompt.md into mannerism instructions, not identity.
+
+    Leading ``You are X…`` / ``I am X…`` claims become ``mannerisms of {name}``.
+    """
+    label = (persona_name or "this persona").strip() or "this persona"
+    text = (raw or "").strip()
+    if not text:
+        return (
+            f"distinctive tone, vocabulary, and cadence associated with {label}"
+        )
+
+    parts = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)
+    first = parts[0].strip()
+    remainder = parts[1].strip() if len(parts) > 1 else ""
+
+    match = _IDENTITY_SENTENCE.match(first.rstrip(".!?"))
+    if match:
+        rest = _drop_leading_name(match.group(1), label)
+        first = f"mannerisms of {label}: {rest}" if rest else f"mannerisms of {label}"
+    remainder = _IDENTITY_PREFIX.sub("", remainder).strip() if remainder else ""
+    if remainder:
+        return f"{first}. {remainder}".strip()
+    return first
+
+
+def is_style_overlay_prompt(text: Optional[str]) -> bool:
+    return STYLE_OVERLAY_MARKER.lower() in str(text or "").lower()
+
+
+def build_style_overlay_prompt(
+    persona_name: str,
+    style_source: Optional[str] = None,
+) -> str:
+    """Hermes ephemeral overlay: speaking style + voice mannerisms, not a new soul.
+
+    Profile SOUL.md / AGENTS.md / Hermes defaults stay primary identity.
+    Mechanic + Cartman ⇒ mechanic that *speaks like* Cartman.
+    """
+    label = (persona_name or "this persona").strip() or "this persona"
+    raw = (style_source or "").strip()
+    if is_style_overlay_prompt(raw):
+        return raw
+    style = mannerism_from_prompt(raw, label)
+    return (
+        f"{STYLE_OVERLAY_MARKER} — does not replace this profile's role.\n"
+        "Keep the identity, mission, skills, and constraints from this profile's "
+        "SOUL.md / AGENTS.md / Hermes defaults.\n"
+        f"Additionally, reply in the speaking style and mannerisms of {label}: {style}\n"
+        "Do not abandon the profile's job or claim you are only the character instead of that role."
+    )
+
+
 def fallback_system_prompt(name: str, description: Optional[str] = None) -> str:
+    """Mannerism source for a new bundle. Apply wraps this in a style overlay."""
     label = (name or "this persona").strip() or "this persona"
     desc = (description or "").strip()
     if desc and not is_generic_voice_description(desc):
-        if "you are" in desc.lower() or len(desc) >= 40:
-            return desc
-        return (
-            f"You are {label}. {desc} Stay in character while remaining helpful "
-            "and answering the user's questions."
-        )
+        return mannerism_from_prompt(desc, label)
     return (
-        f"You are {label}. Stay in character while remaining helpful and answering "
-        "the user's questions."
+        f"distinctive tone, vocabulary, and cadence associated with {label}; "
+        "stay helpful and complete the profile's job"
     )
 
 

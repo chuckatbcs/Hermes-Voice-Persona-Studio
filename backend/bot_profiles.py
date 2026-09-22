@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from .config_io import get_dotted, load_yaml, update_config_keys
 from .managed_index import SOURCE_TAG, remember_writes
 from .paths import config_path_for_profile, hermes_home, profiles_dir
-from .persona_sync import slugify_persona_id
+from .persona_sync import build_style_overlay_prompt, slugify_persona_id
 
 _PLACEHOLDER_VOICE_IDS = frozenset({"", "default", "none", "null", "undefined"})
 _VOICEBOX_UUID = re.compile(
@@ -193,8 +193,8 @@ def set_profile_persona(
     can read ``system_prompt`` and uninstall --purge can identify them.
     Neutral names (none/default/empty) clear the overlay without deleting
     stored personality definitions. Catalog keys are not themselves active —
-    only ``display.personality`` selects them. Session apply overlays
-    ``agent.system_prompt`` separately and restores it on new-chat reset.
+    only ``display.personality`` selects them as an ephemeral *style* overlay.
+    Session apply does not own user ``agent.system_prompt``.
     """
     path = cfg_path or config_path_for_profile(profile_id)
     if not path.exists():
@@ -216,7 +216,7 @@ def set_profile_persona(
         }
 
     personality_value = {
-        "system_prompt": persona_prompt,
+        "system_prompt": build_style_overlay_prompt(persona_name, persona_prompt),
         "source": SOURCE_TAG,
         "description": persona_name,
     }

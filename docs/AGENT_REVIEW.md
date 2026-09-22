@@ -8,31 +8,40 @@ Other agents should review this document and the diff, leave findings on the PR,
 
 ## 1. Intent / architecture
 
-**Amended 2026-09-22 (Charles, supersedes sticky profile apply).**
+**Amended 2026-09-22 (Charles, supersedes sticky profile apply *and* identity replacement).**
 
 A **speaking persona** is three things bound together:
 
 1. Display name (titlebar / Studio)
-2. LLM system text (`~/.hermes/personas/<id>/prompt.md`, applied through Hermes `display.personality` + `agent.personalities`)
+2. **Speaking-style overlay** (`~/.hermes/personas/<id>/prompt.md` mannerisms, applied through Hermes `display.personality` + `agent.personalities.<name>.system_prompt`)
 3. Bound TTS voice (Fish Audio or local Voicebox `voice_id`)
 
-**Session vs design vs assign:**
+**Profile soul stays primary. Studio does not replace who the bot is.**
 
 | Surface | Role |
 |---|---|
-| **New chat / new session** | Always **stock Hermes**: empty `display.personality`, **empty `agent.system_prompt`** (or the stashed pre-apply prompt), and Nous default TTS **`edge` / `en-US-AriaNeural`**. Must not inherit Studio overlays, leftover KITT/Cartman `agent.system_prompt`, Voicebox Jarvis, Fish clones, or `voice: default`. |
-| **Titlebar dropdown** | Assign/apply a designed speaking persona (prompt + voice) to **this chat session only**. Not a permanent default for every future session. |
-| **Persona Studio modal** | Design: create, clone, edit voices and persona bundles. Does not auto-apply on startup or companion refresh. |
+| **Profile selected** | **Stock profile identity.** Hermes profile defaults, `SOUL.md`, `AGENTS.md`, and stock persona modals. No Studio identity replacement. |
+| **Titlebar dropdown apply** | **Style + voice overlay only** for **this chat session**. Keep the profile’s soul/job/skills. Overlay speaking mannerisms/tone from the Studio persona **and** bind the cloned TTS voice (Fish-prefer). Mechanic + Cartman ⇒ **Mechanic that speaks like Cartman** (snarky Cartman tone, still does PC repair). Research agent + Jarvis ⇒ **researches per its Hermes soul/AGENTS.md, replies/speaks like Jarvis**. |
+| **New chat / no Studio overlay** | Back to **profile stock** (soul + Edge/`en-US-AriaNeural` or stashed profile TTS). Empty `display.personality`. User-owned `agent.system_prompt` restored from stash (or left alone). Must not inherit Studio style, leftover KITT/Cartman identity text, Voicebox Jarvis, or `voice: default`. |
+| **Persona Studio modal** | Design: create, clone, edit voices and persona bundles. Does not auto-apply on startup or companion refresh. Bundles store **mannerism** text, not “You are X” identity. |
 | **Studio “Apply Voice to Bot”** | Group-chat bot TTS bind (profile TTS keys). Not a titlebar session default. |
 
-Hermes Desktop exposes `host.newChat`, `host.state.focusedSessionId` / `focusedStoredSessionId`, and config-file personality overlays. There is **no session-scoped personality or TTS API**. Overlay is therefore config-file + stash/restore:
+**Promax symptom (Charles, mechanic + Cartman):** TTS was Cartman voice; reply text stayed PC-Mechanic (SOUL) and was **not** snarky Cartman. Voice applied; speaking-style overlay did not land (or fought SOUL). Root cause: `apply_session_overlay` wrote full `agent.system_prompt` = “You are Eric Cartman…” which **replaces/competes** with identity instead of adding mannerisms. Cartman `prompt.md` was also full-identity text.
 
-1. Dropdown apply **stashes** pre-apply `display.personality`, **`agent.system_prompt`**, and TTS (`tts.provider`, `tts.edge.voice`, Fish/Voicebox keys).
-2. Writes overlay so *this* chat can speak as the chosen persona: `display.personality` + session `agent.system_prompt` + Fish-prefer TTS. Catalog `agent.personalities.<name>` dicts are **not** themselves active. Fish-prefer runs **only** on this explicit pick.
-3. The next **user-initiated** new chat restores the stash, including `agent.system_prompt` (or `''` if none). If there is no usable TTS stash, restore **Hermes Edge stock**. Never leave KITT/Cartman in `agent.system_prompt`.
-4. Plugin startup calls `POST /session/reset-all` so a leftover overlay cannot stick. Studio-tagged catalog entries may remain; they do nothing unless `display.personality` selects them.
+**Hermes mechanics (do not fight these)** — `hermes_cli/personality.py`:
 
-**Sticky `agent.system_prompt` (Promax mechanic retest):** Charles opened a “default” session with empty `display.personality` and Edge AriaNeural and still got KITT (“I am K.I.T.T. … Knight Rider”). `~/.hermes/profiles/mechanic/config.yaml` still had `agent.system_prompt: You are K.I.T.T. from Knight Rider...`. Hermes injects that field every session, so clearing only the personality overlay is insufficient. Studio-tagged `agent.personalities.kitt` was catalog-only (not a selector). Session apply now stashes/restores `agent.system_prompt`; stock/reset writes the stashed value or `''`. Memories/`USER.md` “Active profile: kitt” can still bias the model and is out of band for this PR (Mechanic scrubbed those on Promax).
+- `display.personality` = selected NAME; empty = no overlay.
+- Personality path must **not** own `agent.system_prompt` (user-owned). Hermes resolves ephemeral as the named personality prompt, else `agent.system_prompt`.
+- Ephemeral overlays are injected at API-call time; **SOUL.md remains primary identity** in prompt assembly.
+
+**Apply path now:**
+
+1. Stash pre-apply `display.personality`, user-owned `agent.system_prompt`, and TTS.
+2. Build a **style-overlay** prompt (strip/rewrite leading “You are X…” into mannerisms; wrap with role-preservation language). Write it to a Studio-managed catalog entry (`source: hermes-personastudio`) and set `display.personality` to that name. **Do not** write character identity into `agent.system_prompt`. Leftover Studio identity in that user-owned field is cleared; real user prompts are kept.
+3. Bind Fish-prefer TTS as before.
+4. Next **user** New Chat restores stash (personality + user `agent.system_prompt` + TTS). Catalog dicts may remain; they do nothing unless selected.
+
+**Sticky leftover `agent.system_prompt` (earlier Promax mechanic retest):** empty `display.personality` + Edge Aria still answered as KITT because leftover `agent.system_prompt: You are K.I.T.T....` is used when no personality is named. Reset still stashes/restores that user-owned field (or `''` if the leftover matched a Studio catalog overlay). Studio must not put Cartman/KITT identity back into it on apply. Memories/`USER.md` “Active profile: kitt” can still bias the model (out of band).
 
 **Hard boundary:** this plugin must stay *outside* `~/.hermes/hermes-agent`. Nous Hermes updates remain a clean checkout. Studio only reads/writes:
 
@@ -69,20 +78,19 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Path | What changed |
 |---|---|
-| `desktop/plugin.js` | Unified apply through **session overlay**. Watcher resets **only** on `focusedStoredSessionId` non-null → null (user New Chat) — not `focusedSessionId` churn. After that reset, **no** extra `host.newChat`. `applyInProgress` gates several seconds and refreshes session atoms. Apply skips newChat on blank drafts; one newChat remains for persisted sessions so `agent.system_prompt` reloads. Startup `POST /session/reset-all`. Titlebar lists **Fish + Voicebox**. Poll 60s + focus refresh. |
-| `backend/session_overlay.py` | **New.** `.studio-session.json` stashes pre-apply personality, **`agent.system_prompt`**, and TTS; restore on new session. Unusable stash / first-run stock → **edge / en-US-AriaNeural**. Never writes Voicebox `voice: default` or invents Jarvis as stock. Catalog personality dicts are not active. |
-| `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; Edge voice read from `tts.edge.voice`. |
+| `desktop/plugin.js` | Unified apply through **session overlay**. Watcher resets **only** on `focusedStoredSessionId` non-null → null (user New Chat). After that reset, **no** extra `host.newChat`. `applyInProgress` gates several seconds. Fallback prompts are mannerisms, not “You are X”. Startup `POST /session/reset-all`. Titlebar lists **Fish + Voicebox**. |
+| `backend/session_overlay.py` | **New.** Stash/restore personality + user `agent.system_prompt` + TTS. Apply writes a **style overlay** catalog entry + `display.personality` + Fish-prefer TTS. Does **not** clobber user `agent.system_prompt` with “You are Cartman”. Unusable stash → Edge AriaNeural. |
+| `backend/bot_profiles.py` | Surgical writes; refuse Voicebox id `default`; catalog `system_prompt` is the style overlay (`source: hermes-personastudio`). |
 | `backend/api.py` | Clone returns `{voice, persona}`. `POST /sync-from-voices`, `/resolve-tts`, `/session/reset-all`, `/profiles/{id}/session/apply`, `/profiles/{id}/session/reset`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
-| `backend/persona_sync.py` | Scored name-match (strip Fish `Hermes ` prefix). `Eric Cartman` prefers `Hermes eric_cartman` over `Hermes cartman`. Profile Fish clone-map may win. Fish-prefer resolve; do not downgrade Fish bindings to Voicebox. |
+| `backend/persona_sync.py` | `build_style_overlay_prompt` / `mannerism_from_prompt`. Fallback/sync templates are mannerisms. Scored Fish name-match. Fish-prefer resolve. |
 | `backend/config_io.py` | **New.** Prefer Hermes `atomic_roundtrip_yaml_update`; else PyYAML mutate-only + atomic replace. |
 | `backend/managed_index.py` | **New.** `~/.hermes/personas/.studio-managed.json` snapshots prior values for purge. |
-| `backend/bot_profiles.py` | Surgical writes; personality stored as `{system_prompt, source: hermes-personastudio}`; `HERMES_HOME` injectable. |
 | `backend/paths.py` | **New.** Hermes home / config path helpers including `.studio-session.json`. |
 | `backend/storage.py` | Ignore hidden persona dirs / `.studio-managed.json` / `.studio-session.json`. |
 | `install.py` | Deploy `plugin.js` only; delete stray `plugin.py`; optional `--systemd`; default `--sync-voices`; uninstall stops unit; `--purge` reverts tracked keys and removes `personas/` (**never deletes `config.yaml`**). |
-| `seed_presets.py` | Portable storage root; do not clobber existing `prompt.md`; no in-place `PRESETS` mutation. |
-| `test_backend.py` | Offline tests for sync, Fish name-score, session stash/restore, Edge stock, no Voicebox `default`, surgical YAML, purge, install hygiene, **double-blank session-watch race**. |
-| `README.md` | Clone ≠ TTS-only; session vs sticky; Fish-prefer; uninstall vs purge. |
+| `seed_presets.py` | Mannerism overlays (Jarvis / Cartman / Storyteller), not “You are X” identity. Portable storage root; do not clobber existing `prompt.md`. |
+| `test_backend.py` | Offline tests for style overlay, role-preservation, apply does not write bare Cartman identity, reset clears overlay, Fish name-score, Edge stock, session-watch race. |
+| `README.md` | Style overlay vs soul; session vs sticky; Fish-prefer; uninstall vs purge. |
 | `docs/AGENT_REVIEW.md` | This file. |
 
 ---
@@ -103,7 +111,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Action | Disk | Hermes session |
 |---|---|---|
-| Titlebar pick persona | Stash `display.personality` + **`agent.system_prompt`** + TTS; overlay personality + session system_prompt + Fish-prefer TTS. Catalog dicts are not active by themselves | **One** `host.newChat` only if this session is already persisted (prompt cache). Blank drafts skip it. First prompt must **not** open a second blank |
+| Titlebar pick persona | Stash `display.personality` + user `agent.system_prompt` + TTS; write **style overlay** catalog + select it; Fish-prefer TTS. Does **not** replace SOUL with “You are Cartman” | **One** `host.newChat` only if this session is already persisted. Blank drafts skip it. First prompt must **not** open a second blank |
 | Titlebar pick `Name · Fish` clone | Same session overlay; explicit Fish assign | Same apply reload rule; not sticky |
 | Titlebar pick `Name · Voicebox` clone | Same session overlay; explicit local GPU (slow path; user-forced) | Same apply reload rule; not sticky |
 | Titlebar Standard Hermes | Restore stash, or Edge stock if no usable stash. Never `voicebox.voice: default` | `newChat` only if the current session is persisted |
@@ -152,30 +160,31 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 
 ### Session vs sticky (amended intent 2026-09-22) — **do this first**
 
-1. **New chat → stock Hermes.** Open Hermes Desktop (or click New Chat). Send a short line.
-   - Expect default Hermes **text** (no Cartman/KITT/Jarvis overlay, no leftover `agent.system_prompt`).
-   - Expect **Edge TTS** `en-US-AriaNeural`. Audio should play.
-2. **Dropdown apply is this session only.** Pick the **persona** row for Cartman (not `Cartman · Voicebox`).
-   - Expect toast that prompt + **Fish** applied to **this chat**, and that the next new chat returns to stock Hermes.
-   - This session should speak as Cartman. If a Fish twin exists (`Hermes eric_cartman` preferred over `Hermes cartman`), audio should land in about ≤5 seconds (Promax Fish baseline 2.5–3.4s).
-   - **Do not** get a second blank chat when sending the first prompt. `focusedSessionId` persist is not New Chat.
-3. **New chat again → stock Hermes.** Click New Chat. Send a short line.
-   - Expect default Hermes text + **Edge / AriaNeural** again. Cartman overlay must be gone.
-   - Repeat once with Jarvis and once with KITT if those persona rows exist (`Hermes jarvis` / `Hermes kitt` Fish names).
+1. **New chat → profile stock.** Open Hermes Desktop (or click New Chat). Send a short line.
+   - Expect that **profile’s** default text (mechanic = PC repair / SOUL, not Cartman/KITT identity).
+   - Expect **Edge TTS** `en-US-AriaNeural` (or that profile’s stashed TTS). Audio should play.
+2. **Dropdown apply is style + voice on this session.** On **mechanic**, pick the **persona** row for Cartman (not `Cartman · Voicebox`).
+   - Expect toast that style + **Fish** applied to **this chat**.
+   - Expect **Mechanic that speaks like Cartman**: snarky Cartman tone, still does PC repair (SOUL/job stay). Not “I am only Eric Cartman.”
+   - If a Fish twin exists (`Hermes eric_cartman` preferred over `Hermes cartman`), audio should land in about ≤5 seconds (Promax Fish baseline 2.5–3.4s).
+   - **Do not** get a second blank chat when sending the first prompt.
+3. **Research + Jarvis (if that profile exists).** Pick Jarvis on the research agent. Expect research behavior from that profile’s soul/AGENTS.md, replies/speaks like Jarvis.
+4. **New chat again → profile stock.** Click New Chat. Send a short line.
+   - Expect default profile text (mechanic = PC repair, not Cartman identity) + **Edge / AriaNeural** (or stashed profile TTS). Style overlay must be gone.
 
 ### Latency / Fish-prefer
 
-4. Confirm titlebar clone list includes **both** `Cartman · Fish` and `Cartman · Voicebox` (and Jarvis / KITT if those clones exist). Not Voicebox-only.
-5. Persona-row apply still prefers Fish. Optional slow path: pick `Cartman · Voicebox`. Confirm local GPU is used. Do not treat Voicebox latency as a Studio bug; do not patch Voicebox in this repo.
-6. After New Chat restore, TTS must be **Edge / AriaNeural** (or the real pre-apply stash), never Voicebox `voice: default`, never an invented Jarvis UUID. Mechanic’s old Fish binds / Jarvis Voicebox backup are **not** stock. Fish-prefer is only for an explicit dropdown persona/clone pick.
+5. Confirm titlebar clone list includes **both** `Cartman · Fish` and `Cartman · Voicebox` (and Jarvis / KITT if those clones exist). Not Voicebox-only.
+6. Persona-row apply still prefers Fish. Optional slow path: pick `Cartman · Voicebox`. Confirm local GPU is used. Do not treat Voicebox latency as a Studio bug; do not patch Voicebox in this repo.
+7. After New Chat restore, TTS must be **Edge / AriaNeural** (or the real pre-apply stash), never Voicebox `voice: default`, never an invented Jarvis UUID. Mechanic’s old Fish binds / Jarvis Voicebox backup are **not** stock. Fish-prefer is only for an explicit dropdown persona/clone pick.
 
 ### Original apply / hygiene
 
-7. Titlebar persona or clone still applies **prompt + voice** (no TTS-only early return). Apply uses session overlay, not a sticky profile default.
-8. Clone in Studio still writes a persona bundle. `python3 install.py --sync-voices` is idempotent; Fish twins should win stored `voice_id` over Voicebox.
-9. Polling is 60s / focus, not 8s. Installed tree has `plugin.js` and no `plugin.py`. Plugin does **not** auto-apply a Studio persona on startup or companion refresh.
-10. Uninstall dry-run: plugin gone, systemd stopped, personas remain, `config.yaml` still present. `--purge` only with Charles’ OK.
-11. `git status` inside `~/.hermes/hermes-agent` stays clean.
+8. Titlebar persona or clone still applies **style + voice** (no TTS-only early return). Apply uses session overlay, not a sticky identity replacement.
+9. Clone in Studio still writes a persona bundle. `python3 install.py --sync-voices` is idempotent; Fish twins should win stored `voice_id` over Voicebox.
+10. Polling is 60s / focus, not 8s. Installed tree has `plugin.js` and no `plugin.py`. Plugin does **not** auto-apply a Studio persona on startup or companion refresh.
+11. Uninstall dry-run: plugin gone, systemd stopped, personas remain, `config.yaml` still present. `--purge` only with Charles’ OK.
+12. `git status` inside `~/.hermes/hermes-agent` stays clean.
 
 ---
 
@@ -186,7 +195,9 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 - [ ] Titlebar fetches **Fish + Voicebox** voices (not `provider=voicebox` only)
 - [ ] Persona apply prefers a Fish name-twin; `Name · Voicebox` remains an explicit local choice
 - [ ] `Eric Cartman` resolves `Hermes eric_cartman` over `Hermes cartman`; Jarvis/KITT match `Hermes jarvis` / `Hermes kitt`
-- [ ] New chat is stock Hermes **Edge / en-US-AriaNeural** with **empty `agent.system_prompt`**; dropdown apply is session-scoped; no auto-apply on startup
+- [ ] New chat is **profile stock** (soul + Edge/`en-US-AriaNeural` or stashed TTS); empty `display.personality`; user `agent.system_prompt` not replaced by Cartman/KITT identity
+- [ ] Dropdown apply is a **style + voice overlay**; Mechanic+Cartman keeps PC-repair job with Cartman mannerisms; catalog prompt contains `SPEAKING STYLE OVERLAY` / SOUL.md role language
+- [ ] Apply does **not** write bare `You are Cartman` as `agent.system_prompt`
 - [ ] Session watcher resets overlay **only** on `focusedStoredSessionId` non-null → null; first-prompt `focusedSessionId` churn does **not** wipe or open a second blank; user New Chat does **not** call `host.newChat` again
 - [ ] Session reset never writes Voicebox `voice: default` or a Studio clone as stock
 - [ ] Clone API creates/updates a persona bundle
@@ -241,7 +252,7 @@ Name matching for Fish twins (Promax catalog uses names like `Hermes jarvis`, `H
 
 When `~/.hermes/hermes-agent/utils.py::atomic_roundtrip_yaml_update` cannot be imported (missing ruamel, import collision, etc.), Studio still mutates **only** the dotted keys it owns, then atomically replaces the file via `yaml.safe_dump`. That preserves unrelated mapping keys and values but **can drop comments and original scalar quoting**. It is still strictly better than the previous “load entire doc, dump entire doc with no strategy tag or prior-value index,” and `--purge` can revert the keys Studio recorded.
 
-**Session overlay residual:** Hermes has no true session-scoped personality/TTS API. Apply still writes profile `config.yaml` for the duration of one chat, then restores. If the plugin is not loaded, a user-initiated New Chat will not restore the stash until the plugin mounts (startup `reset-all`). Opening a stored history session restores config without an extra `newChat`. First-prompt `focusedSessionId` persist must not look like New Chat. Apply on a blank draft skips `host.newChat`; if Hermes had already cached stock `agent.system_prompt` for that draft, the first turn might still be stock text until a later session — persisted threads still get one reload newChat (see §11).
+**Session overlay residual:** Hermes has no true session-scoped personality/TTS API. Apply still writes profile `config.yaml` for the duration of one chat, then restores. Style overlay is `display.personality` + catalog prompt injected at API-call time; SOUL.md stays primary. If the plugin is not loaded, a user-initiated New Chat will not restore the stash until the plugin mounts (startup `reset-all`). Opening a stored history session restores config without an extra `newChat`. First-prompt `focusedSessionId` persist must not look like New Chat. Apply on a blank draft skips `host.newChat`; persisted threads still get one reload newChat so the personality name is picked up (see §11). Existing Promax `prompt.md` files that still say “You are Cartman…” are rewritten at apply time; seed/sync only refresh empty prompt files.
 
 **Silent TTS (Promax `20260922_094441_564b69`):** stock/reset wrote Voicebox `voice: default`. Command TTS used `--voice default`, 404'd a stale process-global active-voice UUID (`151b6710-8f59-4366-9410-0b3044ded982`), and played no audio. Reset must never emit that placeholder; first-run stock is Edge AriaNeural, not Voicebox Jarvis.
 

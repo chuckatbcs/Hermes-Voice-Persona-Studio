@@ -79,16 +79,41 @@ class TestPersonaSync(IsolatedHermesHomeTest):
             "Jarvis", "You are Jarvis, a butler."
         )
         self.assertIn("Jarvis", prompt)
-        self.assertTrue(prompt.startswith("You are Jarvis"))
+        self.assertNotRegex(prompt, r"(?i)^you are\b")
+        self.assertIn("mannerisms", prompt.lower())
 
     def test_fallback_prompt_ignores_fish_metadata(self):
         prompt = persona_sync.fallback_system_prompt(
             "Voldemort", "Fish Audio Clone (trained, private)"
         )
-        self.assertEqual(
-            prompt,
-            "You are Voldemort. Stay in character while remaining helpful and answering the user's questions.",
+        self.assertNotRegex(prompt, r"(?i)^you are voldemort")
+        self.assertIn("Voldemort", prompt)
+        self.assertIn("profile's job", prompt)
+
+    def test_style_overlay_preserves_role_language(self):
+        overlay = persona_sync.build_style_overlay_prompt(
+            "Eric Cartman",
+            "You are Eric Cartman from South Park. Speak with aggressive snark.",
         )
+        self.assertIn(persona_sync.STYLE_OVERLAY_MARKER, overlay)
+        self.assertIn("SOUL.md", overlay)
+        self.assertIn("AGENTS.md", overlay)
+        self.assertIn("does not replace this profile's role", overlay)
+        self.assertIn("Do not abandon the profile's job", overlay)
+        self.assertIn("Eric Cartman", overlay)
+        self.assertIn("snark", overlay.lower())
+        self.assertNotRegex(overlay, r"(?i)^you are eric cartman")
+        self.assertNotEqual(overlay.strip(), "You are Eric Cartman.")
+        already = persona_sync.build_style_overlay_prompt("Eric Cartman", overlay)
+        self.assertEqual(already, overlay)
+
+    def test_mannerism_from_prompt_strips_you_are_identity(self):
+        style = persona_sync.mannerism_from_prompt(
+            "You are K.I.T.T. from Knight Rider. Be clipped and loyal.",
+            "K.I.T.T.",
+        )
+        self.assertNotRegex(style, r"(?i)^you are\b")
+        self.assertIn("clipped", style.lower())
 
     def test_sync_from_voices_creates_missing_personas(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
@@ -116,7 +141,8 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         self.assertIn("butler", jarvis.system_prompt.lower())
         cartman = storage.get_persona("cartman")
         self.assertEqual(cartman.voice_id, "voice-cartman-1")
-        self.assertIn("You are Cartman", cartman.system_prompt)
+        self.assertNotIn("You are Cartman", cartman.system_prompt)
+        self.assertIn("Cartman", cartman.system_prompt)
 
     def test_sync_from_voices_is_idempotent(self):
         storage = PersonaStorage(root_dir=str(self.home / "personas"))
@@ -413,7 +439,8 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         self.assertEqual(data["tools"]["enabled"], True)
         self.assertEqual(data["agent"]["max_turns"], 12)
         persona = data["agent"]["personalities"]["jarvis_tech_butler"]
-        self.assertEqual(persona["system_prompt"], "You are Jarvis.")
+        self.assertIn("SPEAKING STYLE OVERLAY", persona["system_prompt"])
+        self.assertNotEqual(persona["system_prompt"].strip(), "You are Jarvis.")
         self.assertEqual(persona["source"], "hermes-personastudio")
         self.assertEqual(data["display"]["personality"], "jarvis_tech_butler")
 
@@ -508,7 +535,12 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(apply["scope"], "session")
         after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(after["display"]["personality"], "eric_cartman")
-        self.assertEqual(after["agent"]["system_prompt"], "You are Eric Cartman.")
+        self.assertNotEqual((after.get("agent") or {}).get("system_prompt") or "", "You are Eric Cartman.")
+        catalog = ((after.get("agent") or {}).get("personalities") or {}).get("eric_cartman") or {}
+        self.assertEqual(catalog.get("source"), "hermes-personastudio")
+        self.assertIn("SPEAKING STYLE OVERLAY", catalog.get("system_prompt") or "")
+        self.assertIn("SOUL.md", catalog.get("system_prompt") or "")
+        self.assertNotEqual((catalog.get("system_prompt") or "").strip(), "You are Eric Cartman.")
         self.assertEqual(after["tts"]["provider"], "fish")
         self.assertEqual(after["tts"]["providers"]["fish"]["voice"], "hermes_eric_cartman")
         self.assertTrue(session_overlay.overlay_status("default")["active"])
@@ -686,8 +718,12 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
             cfg_path=cfg,
         )
         after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
-        self.assertEqual(after["agent"]["system_prompt"], "You are K.I.T.T. from Knight Rider.")
+        self.assertNotEqual(after["agent"]["system_prompt"], "You are K.I.T.T. from Knight Rider.")
+        self.assertEqual(after["agent"]["system_prompt"], "You are a custom mechanic helper.")
         self.assertEqual(after["display"]["personality"], "kitt")
+        catalog = after["agent"]["personalities"]["kitt"]
+        self.assertIn("SPEAKING STYLE OVERLAY", catalog["system_prompt"])
+        self.assertNotIn("You are K.I.T.T. from Knight Rider.", catalog["system_prompt"].split("\n")[0])
         session_overlay.reset_session_overlay("default", cfg_path=cfg)
         restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         self.assertEqual(restored["display"]["personality"], "")
@@ -719,6 +755,52 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertEqual(data["agent"]["system_prompt"], "")
         self.assertEqual(data["agent"]["personalities"]["kitt"]["source"], "hermes-personastudio")
         self.assertEqual(data["tts"]["provider"], "edge")
+
+
+    def test_apply_does_not_write_bare_you_are_cartman_identity(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        apply = session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            cfg_path=cfg,
+        )
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertFalse(apply.get("touched_system_prompt"))
+        self.assertNotEqual((after.get("agent") or {}).get("system_prompt"), "You are Eric Cartman.")
+        catalog = after["agent"]["personalities"]["eric_cartman"]["system_prompt"]
+        self.assertIn("SPEAKING STYLE OVERLAY", catalog)
+        self.assertIn("SOUL.md", catalog)
+        self.assertIn("profile's job", catalog.lower())
+        self.assertNotEqual(catalog.strip(), "You are Eric Cartman.")
+        self.assertNotRegex(catalog, r"(?im)^you are eric cartman\.?$")
+
+    def test_reset_clears_style_overlay_selection(self):
+        from backend import session_overlay
+
+        cfg = self._write_config()
+        session_overlay.apply_session_overlay(
+            "default",
+            persona_name="Jarvis",
+            persona_prompt="You are Jarvis.",
+            provider="fish_audio",
+            voice_id="jarvis-id",
+            voice_name="Hermes jarvis",
+            cfg_path=cfg,
+        )
+        after = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(after["display"]["personality"], "jarvis")
+        self.assertIn("SPEAKING STYLE OVERLAY", after["agent"]["personalities"]["jarvis"]["system_prompt"])
+        session_overlay.reset_session_overlay("default", cfg_path=cfg)
+        restored = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        self.assertEqual(restored["display"]["personality"], "")
+        self.assertEqual((restored.get("agent") or {}).get("system_prompt") or "", "")
+        self.assertFalse(session_overlay.overlay_status("default")["active"])
 
 
 class TestPluginSessionWatchRace(unittest.TestCase):
@@ -907,6 +989,11 @@ class TestSeedPresets(IsolatedHermesHomeTest):
         seed_presets.seed()
         prompt_again = (self.home / "personas" / "jarvis" / "prompt.md").read_text(encoding="utf-8")
         self.assertEqual(prompt, prompt_again)
+        self.assertNotRegex(prompt, r"(?i)^you are\b")
+        cartman = (self.home / "personas" / "cartman" / "prompt.md").read_text(encoding="utf-8")
+        self.assertNotRegex(cartman, r"(?i)^you are eric cartman")
+        self.assertIn("PC repair", cartman)
+        self.assertIn("role", cartman.lower())
 
 
 if __name__ == "__main__":
