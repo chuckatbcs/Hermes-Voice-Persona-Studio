@@ -179,7 +179,7 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
    - Expect toast that style + **Fish** applied to **this chat**.
    - Expect **Mechanic that speaks like Cartman**: snarky Cartman tone, still does PC repair (SOUL/job stay). Not “I am only Eric Cartman.”
    - If a Fish twin exists (`Hermes eric_cartman` preferred over `Hermes cartman`), audio should land in about ≤5 seconds (Promax Fish baseline 2.5–3.4s).
-   - Apply must **not** start a new session. Next reply in this chat should be Mechanic-that-speaks-like-Cartman.
+   - Apply must **not** start a new session. Next reply in **this** open chat should pick up the overlay (mid-session `config.set` personality refresh). New Chat is not required for the identity change.
 3. **Research + Jarvis (if that profile exists).** Pick Jarvis on the research agent. Expect research behavior from that profile’s soul/AGENTS.md, replies/speaks like Jarvis.
 4. **New chat again → profile stock.** Click New Chat. Send a short line.
    - Expect default profile text (mechanic = PC repair, not Cartman identity) + **Edge / AriaNeural** (or stashed profile TTS). Style overlay must be gone.
