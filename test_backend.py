@@ -818,6 +818,85 @@ class TestSessionOverlay(IsolatedHermesHomeTest):
         self.assertTrue(session_overlay.overlay_status("mechanic")["active"])
         self.assertFalse(session_overlay.overlay_status("magellan")["active"])
 
+    def test_reset_clears_untagged_cartman_personality_leftover(self):
+        """Critic: display.personality cartman (no SOURCE_TAG) survived tagged-only clear."""
+        from backend import session_overlay
+
+        critic = self.home / "profiles" / "critic" / "config.yaml"
+        mechanic = self.home / "profiles" / "mechanic" / "config.yaml"
+        critic.parent.mkdir(parents=True)
+        mechanic.parent.mkdir(parents=True)
+        critic.write_text(
+            "agent:\n"
+            "  system_prompt: You are K.I.T.T. leftover\n"
+            "  personalities:\n"
+            "    cartman:\n"
+            "      system_prompt: Speak like Cartman.\n"
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: cartman\n",
+            encoding="utf-8",
+        )
+        mechanic.write_text(
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: ''\n",
+            encoding="utf-8",
+        )
+        session_overlay.apply_session_overlay(
+            "mechanic",
+            persona_name="Eric Cartman",
+            persona_prompt="You are Eric Cartman.",
+            provider="fish_audio",
+            voice_id="cartman-id",
+            voice_name="Hermes eric_cartman",
+            cfg_path=mechanic,
+        )
+        reset = session_overlay.reset_session_overlay("critic", cfg_path=critic)
+        self.assertTrue(reset["leftover_personality_cleared"])
+        critic_after = yaml.safe_load(critic.read_text(encoding="utf-8"))
+        mechanic_after = yaml.safe_load(mechanic.read_text(encoding="utf-8"))
+        self.assertEqual(critic_after["display"]["personality"], "")
+        self.assertEqual(critic_after["tts"]["provider"], "edge")
+        self.assertEqual(critic_after["tts"]["edge"]["voice"], "en-US-AriaNeural")
+        self.assertEqual(
+            critic_after["agent"]["personalities"]["cartman"]["system_prompt"],
+            "Speak like Cartman.",
+        )
+        self.assertEqual(critic_after["agent"]["system_prompt"], "You are K.I.T.T. leftover")
+        self.assertEqual(mechanic_after["display"]["personality"], "eric_cartman")
+        self.assertTrue(session_overlay.overlay_status("mechanic")["active"])
+        self.assertFalse(session_overlay.overlay_status("critic")["active"])
+
+    def test_reset_all_clears_untagged_personality_without_session_entry(self):
+        from backend import session_overlay
+
+        critic = self.home / "profiles" / "critic" / "config.yaml"
+        critic.parent.mkdir(parents=True)
+        critic.write_text(
+            "tts:\n"
+            "  provider: edge\n"
+            "  edge:\n"
+            "    voice: en-US-AriaNeural\n"
+            "display:\n"
+            "  personality: cartman\n",
+            encoding="utf-8",
+        )
+        report = session_overlay.reset_all_session_overlays()
+        self.assertTrue(report["ok"])
+        after = yaml.safe_load(critic.read_text(encoding="utf-8"))
+        self.assertEqual(after["display"]["personality"], "")
+        self.assertEqual(after["tts"]["provider"], "edge")
+        self.assertTrue(
+            any(p.get("profile_id") == "critic" and p.get("leftover_personality_cleared") for p in report["profiles"])
+        )
+
     def test_apply_does_not_write_bare_you_are_cartman_identity(self):
         from backend import session_overlay
 

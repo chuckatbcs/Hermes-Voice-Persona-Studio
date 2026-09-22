@@ -189,23 +189,22 @@ def _is_studio_injected_prompt(cfg: Dict[str, Any], prompt: str) -> bool:
     return False
 
 
-def _clear_studio_personality_selection(cfg_path: Path) -> bool:
-    """Clear a Studio-tagged display.personality. Catalog dicts stay put.
+def _clear_display_personality_for_stock(cfg_path: Path) -> bool:
+    """Force stock: empty ``display.personality``. Catalog dicts stay put.
 
-    ``agent.personalities.<name>`` entries are not themselves active; only
-    ``display.personality`` selects them as an ephemeral style overlay.
+    Promax critic: leftover ``display.personality: cartman`` was a Hermes
+    catalog name (no ``source: hermes-personastudio``). The old tagged-only
+    clear left Cartman style with Edge stock voice. Any selected name is an
+    ephemeral overlay — stock means none.
     """
     if not cfg_path.exists():
         return False
     cfg = load_yaml(cfg_path)
     selected = get_dotted(cfg, "display.personality")
-    if not selected:
+    if selected in (None, ""):
         return False
-    personality = get_dotted(cfg, f"agent.personalities.{selected}")
-    if isinstance(personality, dict) and personality.get("source") == SOURCE_TAG:
-        update_config_keys(cfg_path, {"display.personality": ""})
-        return True
-    return False
+    update_config_keys(cfg_path, {"display.personality": ""})
+    return True
 
 
 def _stock_system_prompt_update() -> Dict[str, Any]:
@@ -324,7 +323,7 @@ def reset_session_overlay(
             update_config_keys(path, updates)
             restored_keys = list(updates.keys())
     elif path.exists():
-        leftover_cleared = _clear_studio_personality_selection(path)
+        leftover_cleared = _clear_display_personality_for_stock(path)
         leftover_cleared = _clear_studio_injected_system_prompt(path) or leftover_cleared
         cfg = load_yaml(path)
         stock = _hermes_stock_tts_updates(cfg)
@@ -367,7 +366,7 @@ def reset_all_session_overlays(*, state_path: Optional[Path] = None) -> Dict[str
         if not pid or pid in seen:
             continue
         cfg_path = config_path_for_profile(pid)
-        leftover_cleared = _clear_studio_personality_selection(cfg_path)
+        leftover_cleared = _clear_display_personality_for_stock(cfg_path)
         leftover_cleared = _clear_studio_injected_system_prompt(cfg_path) or leftover_cleared
         placeholder_fix: Dict[str, Any] = {}
         if cfg_path.exists():
