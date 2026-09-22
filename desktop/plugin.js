@@ -66,6 +66,80 @@ function namesMatch(left, right) {
   return false;
 }
 
+function isFishProvider(provider) {
+  const p = String(provider || '').toLowerCase();
+  return p === 'fish' || p === 'fish_audio';
+}
+
+function providerLabel(provider) {
+  return isFishProvider(provider) ? 'Fish' : 'Voicebox';
+}
+
+function voiceSelectionKey(voice) {
+  return `voice:${voice.provider || 'voicebox'}:${voice.id}`;
+}
+
+function personaSelectionKey(persona) {
+  return `persona:${persona.id}`;
+}
+
+function parseSelection(id) {
+  if (!id) return { kind: 'unknown' };
+  if (id === 'default' || id === '__open_studio__') return { kind: id };
+  if (id.startsWith('persona:')) return { kind: 'persona', personaId: id.slice('persona:'.length), explicit: false };
+  if (id.startsWith('voice:')) {
+    const rest = id.slice('voice:'.length);
+    const splitAt = rest.indexOf(':');
+    if (splitAt <= 0) return { kind: 'unknown' };
+    return {
+      kind: 'voice',
+      provider: rest.slice(0, splitAt),
+      voiceId: rest.slice(splitAt + 1),
+      explicit: true
+    };
+  }
+  return { kind: 'legacy', id, explicit: false };
+}
+
+function lookupSelection(id, personas, voices) {
+  const sel = parseSelection(id);
+  if (sel.kind === 'persona') {
+    return { persona: (personas || []).find(p => p.id === sel.personaId) || null, voice: null };
+  }
+  if (sel.kind === 'voice') {
+    return {
+      persona: null,
+      voice: (voices || []).find(v =>
+        v.id === sel.voiceId &&
+        (v.provider === sel.provider || (isFishProvider(v.provider) && isFishProvider(sel.provider)))
+      ) || null
+    };
+  }
+  if (sel.kind === 'legacy') {
+    return {
+      persona: (personas || []).find(p => p.id === sel.id) || null,
+      voice: (voices || []).find(v => v.id === sel.id) || null
+    };
+  }
+  return { persona: null, voice: null };
+}
+
+function preferredProviderForPersona(persona, voices) {
+  if (!persona) return 'voicebox';
+  if (isFishProvider(persona.provider) && persona.voice_id && persona.voice_id !== 'default') {
+    return persona.provider;
+  }
+  const names = [persona.name, persona.id, persona.voice_name];
+  const fishTwin = (voices || []).find(v =>
+    isFishProvider(v.provider) &&
+    v.voice_type === 'cloned' &&
+    v.id && v.id !== 'default' &&
+    names.some(n => n && (namesMatch(n, v.name) || namesMatch(n, v.id)))
+  );
+  if (fishTwin) return fishTwin.provider;
+  return persona.provider || 'voicebox';
+}
+
 function focusedProfile() {
   try {
     return host.state.focusedSessionProfile.get() || 'default';
@@ -143,10 +217,16 @@ function PersonaStudioRoot() {
 
   const refreshVoices = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/voices?provider=voicebox`);
+      const res = await fetch(`${API_BASE}/voices`);
       if (res.ok) {
         const list = await res.json();
-        setVoices(list.filter(v => v.voice_type === 'cloned'));
+        setVoices((list || []).filter(v => v.voice_type === 'cloned' && v.id && v.id !== 'default')
+          .sort((a, b) => {
+            const ar = isFishProvider(a.provider) ? 0 : 1;
+            const br = isFishProvider(b.provider) ? 0 : 1;
+            if (ar !== br) return ar - br;
+            return String(a.name || '').localeCompare(String(b.name || ''));
+          }));
       }
     } catch (_) {}
   }, []);
@@ -185,17 +265,22 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
 
   const onSelectPersona = async (id) => {
     console.log('[PersonaStudio] Selected:', id);
-    if (id === '__open_studio__') {
+    const selection = parseSelection(id);
+    if (selection.kind === '__open_studio__') {
       openStudio();
       return;
     }
     setActiveId(id);
 
     const profile = focusedProfile();
-    const personaMatch = personas.find(p => p.id === id);
-    const voiceMatch = voices.find(v => v.id === id);
+    const personaMatch = selection.kind === 'persona'
+      ? personas.find(p => p.id === selection.personaId)
+      : (selection.kind === 'legacy' ? personas.find(p => p.id === selection.id) : null);
+    const voiceMatch = selection.kind === 'voice'
+      ? voices.find(v => v.id === selection.voiceId && (v.provider === selection.provider || (isFishProvider(v.provider) && isFishProvider(selection.provider))))
+      : (selection.kind === 'legacy' ? voices.find(v => v.id === selection.id) : null);
 
-    if (id === 'default') {
+    if (selection.kind === 'default' || id === 'default') {
       try {
         const res = await fetch(`${API_BASE}/profiles/${encodeURIComponent(profile)}/set-persona`, {
           method: 'POST',
@@ -273,9 +358,34 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       console.warn('[PersonaStudio] Persona set error:', e);
     }
 
-    const boundVoiceId = (bundle.voice_id && bundle.voice_id !== 'default') ? bundle.voice_id : (voiceMatch && voiceMatch.id);
-    const boundVoiceName = bundle.voice_name || (voiceMatch && voiceMatch.name) || boundVoiceId;
-    const boundProvider = bundle.provider || (voiceMatch && voiceMatch.provider) || 'voicebox';
+    let boundProvider = bundle.provider || (voiceMatch && voiceMatch.provider) || 'voicebox';
+    let boundVoiceId = (bundle.voice_id && bundle.voice_id !== 'default') ? bundle.voice_id : (voiceMatch && voiceMatch.id);
+    let boundVoiceName = bundle.voice_name || (voiceMatch && voiceMatch.name) || boundVoiceId;
+    let resolveReason = 'bundle';
+    try {
+      const resolveRes = await fetch(`${API_BASE}/resolve-tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          persona_id: bundle.id,
+          voice_id: voiceMatch ? voiceMatch.id : (bundle.voice_id || null),
+          provider: voiceMatch ? voiceMatch.provider : (selection.explicit ? selection.provider : null),
+          explicit: !!selection.explicit
+        })
+      });
+      if (resolveRes.ok) {
+        const resolved = await resolveRes.json();
+        if (resolved.voice_id) {
+          boundProvider = resolved.provider || boundProvider;
+          boundVoiceId = resolved.voice_id;
+          boundVoiceName = resolved.voice_name || boundVoiceName;
+          resolveReason = resolved.reason || resolveReason;
+        }
+      }
+    } catch (e) {
+      console.warn('[PersonaStudio] TTS resolve error, using bundle voice:', e);
+    }
+
     let voiceApplied = false;
     if (boundVoiceId && boundVoiceId !== 'default') {
       try {
@@ -301,24 +411,31 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       await startNewChat(profile);
     }
 
+    const ttsLabel = providerLabel(boundProvider);
     host.toast({
-      title: `${bundle.avatar || '🎭'} ${bundle.name}`,
+      title: `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
       message: textApplied && voiceApplied
-        ? `Prompt + voice applied to "${profile}"`
+        ? `Prompt + ${ttsLabel} voice applied to "${profile}"`
         : textApplied
           ? `Prompt applied to "${profile}"` + (boundVoiceId && boundVoiceId !== 'default' ? ' (voice assignment failed)' : '')
           : voiceApplied
-            ? `Voice applied to "${profile}" (prompt apply failed)`
+            ? `${ttsLabel} voice applied to "${profile}" (prompt apply failed)`
             : `Failed to apply speaking persona on "${profile}"`
     });
 
-    window.__ACTIVE_PERSONA_STUDIO__ = bundle;
+    window.__ACTIVE_PERSONA_STUDIO__ = { ...bundle, apply_provider: boundProvider, apply_voice_id: boundVoiceId, apply_reason: resolveReason };
   };
 
-  const currentPersona = personas.find(p => p.id === activeId);
-  const currentVoice = voices.find(v => v.id === activeId);
+  const currentLookup = lookupSelection(activeId, personas, voices);
+  const currentPersona = currentLookup.persona;
+  const currentVoice = currentLookup.voice;
   const current = currentPersona || currentVoice;
-  const triggerLabel = current ? `${current.avatar || '🎙️'} ${current.name}` : '🎭 Personas';
+  const currentProvider = currentPersona
+    ? preferredProviderForPersona(currentPersona, voices)
+    : (currentVoice && currentVoice.provider);
+  const triggerLabel = current
+    ? `${current.avatar || '🎙️'} ${current.name} · ${providerLabel(currentProvider)}`
+    : '🎭 Personas';
 
   return jsxs('div', {
     style: { display: 'flex', alignItems: 'center', gap: '6px', marginRight: '8px' },
@@ -343,26 +460,26 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
                   }),
                   personas.length > 0 && jsxs('div', {
                     children: [
-                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎭 PERSONAS' }),
+                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎭 PERSONAS (Fish when a twin exists)' }),
                       personas.map(p =>
                         jsx(SelectItem, {
-                          key: p.id,
-                          value: p.id,
+                          key: personaSelectionKey(p),
+                          value: personaSelectionKey(p),
                           className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
-                          children: `${p.avatar || '🎭'} ${p.name}`
+                          children: `${p.avatar || '🎭'} ${p.name} · ${providerLabel(preferredProviderForPersona(p, voices))}`
                         })
                       )
                     ]
                   }),
                   voices.length > 0 && jsxs('div', {
                     children: [
-                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎙️ CLONES (apply prompt + voice)' }),
+                      jsx('div', { className: 'text-[10px] font-bold text-muted-foreground px-2 pt-1', children: '🎙️ CLONES (Fish preferred; Voicebox is explicit/slow)' }),
                       voices.map(v =>
                         jsx(SelectItem, {
-                          key: v.id,
-                          value: v.id,
+                          key: voiceSelectionKey(v),
+                          value: voiceSelectionKey(v),
                           className: 'text-xs py-1.5 px-2 rounded cursor-pointer hover:bg-accent focus:bg-accent',
-                          children: `${v.voice_type === 'cloned' ? '👤' : '🌟'} ${v.name}`
+                          children: `${v.voice_type === 'cloned' ? '👤' : '🌟'} ${v.name} · ${providerLabel(v.provider)}`
                         })
                       )
                     ]
@@ -393,7 +510,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
 
 // ── Voice & Persona Studio Dialog Modal ───────────────────────────────────
 function StudioModal({ open, onOpenChange, refreshPersonas }) {
-  const [provider, setProvider] = useState('voicebox');
+  const [provider, setProvider] = useState('fish_audio');
   const [voices, setVoices] = useState([]);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState('chatterbox_turbo');
@@ -751,7 +868,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas }) {
                       onChange: (e) => setSelectedVoice(e.target.value),
                       className: 'flex-1 h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring font-medium',
                       children: voices.map(v =>
-                        jsx('option', { key: v.id, value: v.id, children: `${v.voice_type === 'cloned' ? '👤 [My Clone] ' : '🌟 [Preset] '}${v.name}` })
+                        jsx('option', { key: v.id, value: v.id, children: `${v.voice_type === 'cloned' ? '👤 [My Clone] ' : '🌟 [Preset] '}${v.name} · ${providerLabel(v.provider)}` })
                       )
                     }),
                     jsx(Button, {

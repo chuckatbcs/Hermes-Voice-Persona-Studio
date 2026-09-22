@@ -51,9 +51,9 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Path | What changed |
 |---|---|
-| `desktop/plugin.js` | Unified apply: clone **or** persona → ensure bundle → `set-persona` + `assign-voice` → `host.newChat`. Personas listed first. Poll 60s + focus refresh. Clone success refreshes personas. |
-| `backend/api.py` | Clone returns `{voice, persona}`. `POST /api/studio/sync-from-voices`. Empty prompt gets a fallback. |
-| `backend/persona_sync.py` | **New.** Slug/name-match, generic-description filter, idempotent ensure/sync. |
+| `desktop/plugin.js` | Unified apply: clone **or** persona → ensure bundle → `set-persona` + Fish-prefer `assign-voice` → `host.newChat`. Titlebar lists **Fish + Voicebox** clones with `Name · Fish` / `Name · Voicebox` labels. Personas listed first. Poll 60s + focus refresh. |
+| `backend/api.py` | Clone returns `{voice, persona}`. `POST /api/studio/sync-from-voices`. `POST /api/studio/resolve-tts`. Empty prompt gets a fallback. `GET /voices` without provider returns both engines. |
+| `backend/persona_sync.py` | Slug/name-match, Fish-prefer resolve, do not downgrade Fish bindings to Voicebox, generic-description filter, idempotent ensure/sync. |
 | `backend/config_io.py` | **New.** Prefer Hermes `atomic_roundtrip_yaml_update`; else PyYAML mutate-only + atomic replace. |
 | `backend/managed_index.py` | **New.** `~/.hermes/personas/.studio-managed.json` snapshots prior values for purge. |
 | `backend/bot_profiles.py` | Surgical writes; personality stored as `{system_prompt, source: hermes-personastudio}`; `HERMES_HOME` injectable. |
@@ -83,8 +83,9 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 
 | Action | Disk | Hermes session |
 |---|---|---|
-| Titlebar pick persona | `personas/<id>/` unchanged; profile `config.yaml` gets personality dict + `display.personality`; TTS voice keys if `voice_id` ≠ `default` | `host.newChat(profile)` after successful text write so prompt-cache/session overlay refreshes |
-| Titlebar pick clone | If no matching bundle: `POST /personas` writes `prompt.md` + `manifest.json`. Then same as persona pick | Same `newChat` |
+| Titlebar pick persona | `personas/<id>/` unchanged; profile `config.yaml` gets personality dict + `display.personality`; TTS prefers a **Fish** same-name clone when one exists | `host.newChat(profile)` after successful text write so prompt-cache/session overlay refreshes |
+| Titlebar pick `Name · Fish` clone | Same as persona; explicit Fish assign | Same `newChat` |
+| Titlebar pick `Name · Voicebox` clone | Explicit local GPU assign (slow path; user-forced) | Same `newChat` |
 | Titlebar Standard Hermes | `display.personality: ""` (neutral). TTS left as-is | `newChat` after clear |
 | Studio Save Persona | Bundle under `personas/` | Not auto-applied until titlebar/assign |
 | Studio Clone | Provider clone **and** matching persona bundle | Not auto-applied |
@@ -124,45 +125,42 @@ Default uninstall:
 
 ## 7. Promax manual test plan (reviewers / Charles)
 
-Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:17493` if GPU TTS is in use.
+Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:17493` if GPU TTS is in use. Fish API key already configured.
 
-1. **Titlebar clone → both text and voice**
-   - Open a chat on profile `default` (or mechanic).
-   - Pick a Voicebox clone (Cartman / Jarvis / Voldemort) from the titlebar.
-   - Expect toast “Prompt + voice applied”.
-   - Confirm `~/.hermes/personas/<slug>/prompt.md` exists and is the session overlay (new chat opened).
-   - Confirm profile `config.yaml` `display.personality` is the slug and `tts.providers.voicebox.voice` is the clone UUID — **not** TTS-only with an unchanged personality.
-2. **Titlebar persona**
-   - Pick seeded Jarvis / Storyteller / Cartman.
-   - Expect prompt from disk `prompt.md` plus bound voice when `voice_id` ≠ `default`.
-3. **Clone in Studio**
-   - Clone a new name. Response / status should mention a speaking persona, not just a voice.
-   - `GET /api/studio/personas` lists the new bundle with that `voice_id`.
-4. **Sync existing clones**
-   - `python3 install.py --sync-voices` (idempotent). Jarvis/Storyteller should rebind off Fish `default` if a matching clone exists.
-5. **Polling / hygiene**
-   - Titlebar should not hammer `/personas` every 8s (60s or window focus).
-   - Installed plugin dir has `plugin.js` and **no** `plugin.py`.
-6. **Uninstall dry-run / real**
-   - `python3 install.py --uninstall` → plugin gone, systemd stopped, personas remain, `config.yaml` still present.
-   - Only with Charles’ OK: `--purge` on a throwaway profile and confirm tracked keys revert and `personas/` is gone, yaml files still exist.
-7. **Nous checkout**
-   - `git status` inside `~/.hermes/hermes-agent` stays clean.
+### Latency / Fish-prefer (2026-09-22 follow-up)
+
+1. Confirm titlebar clone list includes **both** `Cartman · Fish` and `Cartman · Voicebox` (and Jarvis / KITT if those clones exist). Not Voicebox-only.
+2. Pick the **persona** row for Cartman / Jarvis / KITT (not the Voicebox clone row).
+   - Expect toast mentioning **Fish**.
+   - Profile `config.yaml` has `tts.provider: fish` and a Fish clone label — not `voicebox` unless you picked the Voicebox row.
+   - Spoken reply to a short line should land in **about ≤5 seconds** on Fish (Promax baseline 2.5–3.4s). Time it.
+3. Optional slow path: pick `Cartman · Voicebox`. Confirm local GPU is used. This may take a long time (historically 5–70s; Qwen `/generate/stream` has hung 2+ minutes). Do not treat Voicebox latency as a Studio bug; do not patch Voicebox in this repo.
+4. Mechanic’s interim Fish binds on default (`eric_cartman`) and mechanic (`kitt`) must remain Fish after a persona titlebar pick — this change must not silently flip them back to Voicebox.
+
+### Original apply / hygiene
+
+5. Titlebar persona or clone still applies **prompt + voice**, then `host.newChat`.
+6. Clone in Studio still writes a persona bundle. `python3 install.py --sync-voices` is idempotent; Fish twins should win stored `voice_id` over Voicebox.
+7. Polling is 60s / focus, not 8s. Installed tree has `plugin.js` and no `plugin.py`.
+8. Uninstall dry-run: plugin gone, systemd stopped, personas remain, `config.yaml` still present. `--purge` only with Charles’ OK.
+9. `git status` inside `~/.hermes/hermes-agent` stays clean.
 
 ---
 
 ## 8. Merge checklist for reviewers
 
-- [ ] Diff stays inside this repo; no hermes-agent patches
+- [ ] Diff stays inside this repo; no hermes-agent patches; no Voicebox server patches
 - [ ] Titlebar clone path cannot return after TTS-only assign
+- [ ] Titlebar fetches **Fish + Voicebox** voices (not `provider=voicebox` only)
+- [ ] Persona apply prefers a Fish name-twin; `Name · Voicebox` remains an explicit local choice
 - [ ] Clone API creates/updates a persona bundle
-- [ ] `POST /api/studio/sync-from-voices` is idempotent
+- [ ] `POST /api/studio/sync-from-voices` is idempotent and does not downgrade Fish → Voicebox
 - [ ] Config writes go through `backend/config_io.py` (Hermes atomic or documented PyYAML fallback)
 - [ ] Residual PyYAML risk (comments/quoting may be lost; sibling keys kept) is accepted or Hermes atomic is confirmed on Promax
 - [ ] Uninstall stops systemd; `--purge` never deletes whole `config.yaml`
 - [ ] `plugin.py` cannot remain in the install tree
 - [ ] Offline `python3 -m unittest test_backend.py -v` passes
-- [ ] README does not claim that cloning a voice *alone* used to be a speaking persona; it documents the bundle
+- [ ] README documents Fish-prefer apply and does not claim clone-alone is a speaking persona
 - [ ] **Charles (`chuckatbcs`) explicitly approves merge**
 
 ---
@@ -172,6 +170,28 @@ Environment: Hermes Desktop on Promax, companion on `:17495`, Voicebox on `:1749
 **Do not merge without Charles approval.**
 
 This PR is for human + agent review only. Cloud/background agents must not merge to `main`, force-push `main`, enable auto-merge, or start the next phase.
+
+---
+
+## 10. Latency finding (Promax 2026-09-22) — Fish-prefer policy
+
+Charles verified PR #1 apply intent on Promax: `set-persona` + `assign-voice` both run. Spoken **audio latency** was still unacceptable when the titlebar bound **Voicebox / Qwen** clones.
+
+| Observation | Detail |
+|---|---|
+| Titlebar voice refresh | Hit `GET /api/studio/voices?provider=voicebox` only — Fish clones were not offered |
+| Same short Cartman line | Fish Audio ≈ 2.5–3.4s; Voicebox Qwen `/generate/stream` still generating after **2+ minutes** (GPU busy, open-end generation / code_predictor init) |
+| Older Voicebox TTS | Historically 5–70s; current Qwen path can hang multi-minute |
+| Mechanic interim | Switched `tts.provider` to `fish` for default (`eric_cartman`) and mechanic (`kitt`). **Do not revert that in code.** Product path must prefer Fish so later titlebar picks do not flip those profiles back to Voicebox |
+
+**Policy now implemented**
+
+1. Titlebar (and Studio option labels) list **Fish + Voicebox**, marked `Name · Fish` vs `Name · Voicebox`.
+2. Applying a **persona** (or a non-explicit clone) resolves a Fish twin by name / explicit Fish `voice_id` before `assign-voice`.
+3. Bundles that still store a Voicebox UUID are fine; apply-time resolve still binds Fish when a twin exists.
+4. Choosing `Name · Voicebox` sets `explicit=true` and **forces** local GPU (Charles can opt in).
+5. Sync/ensure will not downgrade an existing Fish bundle binding to Voicebox.
+6. Voicebox **server** code is out of scope (lives elsewhere). This repo does not patch Nous `hermes-agent`.
 
 ---
 

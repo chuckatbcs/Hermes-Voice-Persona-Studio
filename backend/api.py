@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import base64
-import os
-import uuid
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -58,6 +56,13 @@ class AssignVoiceRequest(BaseModel):
 class SetPersonaRequest(BaseModel):
     persona_name: str
     persona_prompt: str
+
+
+class ResolveTtsRequest(BaseModel):
+    persona_id: Optional[str] = None
+    voice_id: Optional[str] = None
+    provider: Optional[str] = None
+    explicit: bool = False
 
 
 @router.get("/status")
@@ -135,6 +140,7 @@ async def resample_voice(
 
 @router.get("/voices")
 def list_voices(provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List voices. Omit provider to return Fish + Voicebox together."""
     out: List[Dict[str, Any]] = []
     target_providers = [PROVIDERS[provider]] if provider and provider in PROVIDERS else PROVIDERS.values()
 
@@ -211,6 +217,37 @@ def sync_from_voices() -> Dict[str, Any]:
     """Idempotently create/update persona bundles for existing TTS clones."""
     voices = persona_sync.collect_provider_voices(PROVIDERS)
     return persona_sync.sync_personas_from_voices(storage, voices)
+
+
+@router.post("/resolve-tts")
+def resolve_tts(req: ResolveTtsRequest) -> Dict[str, Any]:
+    """Prefer a Fish clone twin unless the caller explicitly selected Voicebox."""
+    voices = persona_sync.collect_provider_voices(PROVIDERS)
+    bundle = storage.get_persona(req.persona_id) if req.persona_id else None
+    selected = None
+    if req.voice_id:
+        for info in voices:
+            if info.id == req.voice_id and (
+                not req.provider or info.provider == req.provider or (
+                    persona_sync.is_fish_provider(req.provider) and persona_sync.is_fish_provider(info.provider)
+                )
+            ):
+                selected = info
+                break
+        if selected is None:
+            selected = VoiceInfo(
+                id=req.voice_id,
+                name=req.voice_id,
+                provider=req.provider or "voicebox",
+                voice_type="cloned",
+            )
+    result = persona_sync.resolve_tts_for_apply(
+        bundle=bundle,
+        selected_voice=selected,
+        voices=voices,
+        explicit=req.explicit,
+    )
+    return {"ok": True, **result}
 
 
 @router.post("/personas")

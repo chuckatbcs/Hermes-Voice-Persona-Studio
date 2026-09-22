@@ -183,6 +183,129 @@ class TestPersonaSync(IsolatedHermesHomeTest):
         self.assertEqual(second.voice_id, "def")
         self.assertEqual(len(storage.list_personas()), 1)
 
+    def test_sync_does_not_downgrade_fish_binding_to_voicebox(self):
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        voices = [
+            VoiceInfo(id="fish-cartman", name="Cartman", provider="fish_audio", voice_type="cloned"),
+            VoiceInfo(id="vb-cartman", name="Cartman", provider="voicebox", voice_type="cloned"),
+        ]
+        persona_sync.sync_personas_from_voices(storage, voices)
+        loaded = storage.get_persona("cartman")
+        self.assertEqual(loaded.provider, "fish_audio")
+        self.assertEqual(loaded.voice_id, "fish-cartman")
+
+    def test_sync_upgrades_voicebox_bundle_when_fish_twin_appears(self):
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        persona_sync.ensure_persona_for_voice(
+            storage,
+            VoiceInfo(id="vb-kitt", name="KITT", provider="voicebox", voice_type="cloned"),
+        )
+        persona_sync.ensure_persona_for_voice(
+            storage,
+            VoiceInfo(id="fish-kitt", name="kitt", provider="fish_audio", voice_type="cloned"),
+        )
+        loaded = storage.get_persona("kitt")
+        self.assertEqual(loaded.provider, "fish_audio")
+        self.assertEqual(loaded.voice_id, "fish-kitt")
+
+    def test_resolve_prefers_fish_twin_for_voicebox_stored_persona(self):
+        bundle = PersonaBundle(
+            id="cartman",
+            name="Eric Cartman",
+            avatar="🧢",
+            system_prompt="Respect my authoritah.",
+            provider="voicebox",
+            voice_id="vb-cartman-uuid",
+            voice_name="Cartman",
+        )
+        voices = [
+            VoiceInfo(id="vb-cartman-uuid", name="Cartman", provider="voicebox", voice_type="cloned"),
+            VoiceInfo(id="fish-cartman-id", name="Cartman", provider="fish_audio", voice_type="cloned"),
+        ]
+        resolved = persona_sync.resolve_tts_for_apply(bundle=bundle, voices=voices, explicit=False)
+        self.assertEqual(resolved["provider"], "fish_audio")
+        self.assertEqual(resolved["voice_id"], "fish-cartman-id")
+        self.assertEqual(resolved["reason"], "fish-twin-by-name")
+
+    def test_resolve_explicit_voicebox_selection_is_honored(self):
+        bundle = PersonaBundle(
+            id="cartman",
+            name="Eric Cartman",
+            avatar="🧢",
+            system_prompt="Respect my authoritah.",
+            provider="voicebox",
+            voice_id="vb-cartman-uuid",
+            voice_name="Cartman",
+        )
+        selected = VoiceInfo(id="vb-cartman-uuid", name="Cartman", provider="voicebox", voice_type="cloned")
+        voices = [
+            selected,
+            VoiceInfo(id="fish-cartman-id", name="Cartman", provider="fish_audio", voice_type="cloned"),
+        ]
+        resolved = persona_sync.resolve_tts_for_apply(
+            bundle=bundle,
+            selected_voice=selected,
+            voices=voices,
+            explicit=True,
+        )
+        self.assertEqual(resolved["provider"], "voicebox")
+        self.assertEqual(resolved["voice_id"], "vb-cartman-uuid")
+        self.assertEqual(resolved["reason"], "explicit-selection")
+
+    def test_resolve_kitt_name_match_to_fish(self):
+        bundle = PersonaBundle(
+            id="kitt",
+            name="KITT",
+            avatar="🚗",
+            system_prompt="You are KITT.",
+            provider="voicebox",
+            voice_id="vb-kitt",
+            voice_name="KITT",
+        )
+        voices = [
+            VoiceInfo(id="vb-kitt", name="KITT", provider="voicebox", voice_type="cloned"),
+            VoiceInfo(id="fish-kitt", name="kitt", provider="fish_audio", voice_type="cloned"),
+        ]
+        resolved = persona_sync.resolve_tts_for_apply(bundle=bundle, voices=voices)
+        self.assertEqual(resolved["voice_id"], "fish-kitt")
+        self.assertTrue(persona_sync.is_fish_provider(resolved["provider"]))
+
+    def test_resolve_falls_back_to_voicebox_without_fish_twin(self):
+        bundle = PersonaBundle(
+            id="voldemort",
+            name="Voldemort",
+            avatar="🐍",
+            system_prompt="You are Voldemort.",
+            provider="voicebox",
+            voice_id="vb-voldy",
+            voice_name="Voldemort",
+        )
+        voices = [
+            VoiceInfo(id="vb-voldy", name="Voldemort", provider="voicebox", voice_type="cloned"),
+        ]
+        resolved = persona_sync.resolve_tts_for_apply(bundle=bundle, voices=voices)
+        self.assertEqual(resolved["provider"], "voicebox")
+        self.assertEqual(resolved["voice_id"], "vb-voldy")
+        self.assertEqual(resolved["reason"], "bundle-stored-voice")
+
+    def test_resolve_ignores_fish_system_default(self):
+        bundle = PersonaBundle(
+            id="jarvis",
+            name="Jarvis (Tech Butler)",
+            avatar="🤖",
+            system_prompt="You are Jarvis.",
+            provider="fish_audio",
+            voice_id="default",
+            voice_name="Fish Audio (Default)",
+        )
+        voices = [
+            VoiceInfo(id="default", name="Fish Audio (Default Voice)", provider="fish_audio", voice_type="system"),
+            VoiceInfo(id="fish-jarvis", name="Jarvis", provider="fish_audio", voice_type="cloned"),
+        ]
+        resolved = persona_sync.resolve_tts_for_apply(bundle=bundle, voices=voices)
+        self.assertEqual(resolved["voice_id"], "fish-jarvis")
+        self.assertEqual(resolved["reason"], "fish-twin-by-name")
+
 
 class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
     def _write_config(self, extra: str = "") -> Path:

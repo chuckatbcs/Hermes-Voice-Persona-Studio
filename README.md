@@ -89,7 +89,7 @@ Optional: `python3 install.py --systemd` installs a user unit for the companion.
 ### 1. Launching the Studio
 1. Open **Hermes Desktop**.
 2. In the chat header, use the **titlebar persona control** (`🎭 Personas`) or click **`🎙️ Studio`**.
-3. Picking a **persona** or a **clone** applies **both** the LLM system text and the bound TTS voice, then starts a new chat so the overlay is not stuck in the previous session cache.
+3. Picking a **persona** applies LLM system text **and** a TTS voice. If a **Fish Audio** clone matches the persona name, Studio binds Fish (typically a few seconds). Local **Voicebox / Qwen** remains available as an explicit `Name · Voicebox` clone choice; that path can take minutes on a loaded GPU.
 
 ### 2. Auditioning Voices
 1. Select your provider (**Voicebox (Local GPU)** or **Fish Audio (Cloud)**).
@@ -125,7 +125,8 @@ The companion service runs at `http://127.0.0.1:17495`.
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/studio/status` | `GET` | Health check and provider availability |
-| `/api/studio/voices?provider={p}` | `GET` | List available voices (custom & presets) |
+| `/api/studio/voices?provider={p}` | `GET` | List voices. Omit `provider` to return **Fish + Voicebox** |
+| `/api/studio/resolve-tts` | `POST` | Prefer a Fish clone twin unless `explicit` selected Voicebox |
 | `/api/studio/models?provider={p}` | `GET` | List synthesis engines (Qwen, Chatterbox, etc.) |
 | `/api/studio/audition` | `POST` | Generate real-time preview audio from text |
 | `/api/studio/clone` | `POST` | Upload audio, register the cloned voice, **and** create/update the matching persona bundle |

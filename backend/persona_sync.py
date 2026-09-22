@@ -21,6 +21,9 @@ GENERIC_DESCRIPTION_PREFIXES = (
 
 STOP_TOKENS = frozenset({"the", "a", "an", "of", "and", "my", "voice", "clone"})
 
+FISH_PROVIDERS = frozenset({"fish", "fish_audio"})
+PREFERRED_TTS_PROVIDER = "fish_audio"
+
 
 def slugify_persona_id(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", (name or "").strip().lower()).strip("_")
@@ -30,6 +33,23 @@ def slugify_persona_id(name: str) -> str:
 def name_tokens(name: str) -> set:
     tokens = set(slugify_persona_id(name).split("_"))
     return {t for t in tokens if t and t not in STOP_TOKENS}
+
+
+def is_fish_provider(provider: Optional[str]) -> bool:
+    return (provider or "").strip().lower() in FISH_PROVIDERS
+
+
+def provider_display_name(provider: Optional[str]) -> str:
+    return "Fish" if is_fish_provider(provider) else "Voicebox"
+
+
+def provider_rank(provider: Optional[str]) -> int:
+    """Higher rank wins when reconciling Fish vs Voicebox onto one bundle."""
+    if is_fish_provider(provider):
+        return 2
+    if (provider or "").strip().lower() == "voicebox":
+        return 1
+    return 0
 
 
 def names_match(left: str, right: str) -> bool:
@@ -116,9 +136,15 @@ def ensure_persona_for_voice(
     prompt = fallback_system_prompt(info.name, info.description)
 
     if existing:
-        existing.provider = info.provider or existing.provider
-        existing.voice_id = info.id
-        existing.voice_name = info.name or existing.voice_name
+        incoming_rank = provider_rank(info.provider)
+        existing_rank = provider_rank(existing.provider)
+        placeholder = existing.voice_id in (None, "", "default")
+        # Fish wins over Voicebox so apply/sync do not re-bind the slow local path
+        # after a Fish twin exists. Voicebox still binds when it is the only clone.
+        if placeholder or incoming_rank >= existing_rank:
+            existing.provider = info.provider or existing.provider
+            existing.voice_id = info.id
+            existing.voice_name = info.name or existing.voice_name
         if overwrite_prompt or not (existing.system_prompt or "").strip():
             existing.system_prompt = prompt
         return storage.save_persona(existing)
@@ -174,6 +200,142 @@ def sync_personas_from_voices(
         "updated": updated,
         "skipped": skipped,
         "personas": [p.to_dict() for p in storage.list_personas()],
+    }
+
+
+def _usable_clone(info: VoiceInfo) -> bool:
+    if not info.id or info.id == "default":
+        return False
+    return info.voice_type in ("cloned", "custom")
+
+
+def find_name_matching_clones(
+    names: Iterable[str],
+    voices: Iterable[Any],
+    *,
+    fish_only: bool = False,
+) -> List[VoiceInfo]:
+    catalog = [_voice_as_info(v) for v in voices if _usable_clone(_voice_as_info(v))]
+    needles = [n for n in names if n]
+    hits: List[VoiceInfo] = []
+    seen = set()
+    for info in catalog:
+        if fish_only and not is_fish_provider(info.provider):
+            continue
+        if not fish_only and is_fish_provider(info.provider):
+            continue
+        if any(names_match(needle, info.name) or names_match(needle, info.id) for needle in needles):
+            key = (info.provider, info.id)
+            if key not in seen:
+                seen.add(key)
+                hits.append(info)
+    hits.sort(
+        key=lambda v: (
+            0 if any(slugify_persona_id(n) == slugify_persona_id(v.name) for n in needles) else 1,
+            v.name.lower(),
+        )
+    )
+    return hits
+
+
+def preferred_provider_for_persona(
+    bundle: Optional[PersonaBundle],
+    voices: Iterable[Any],
+) -> str:
+    """Provider label for dropdowns: Fish if a twin exists, else the bundle's provider."""
+    resolved = resolve_tts_for_apply(bundle=bundle, voices=voices, explicit=False)
+    if resolved.get("voice_id"):
+        return resolved.get("provider") or (bundle.provider if bundle else "voicebox")
+    return (bundle.provider if bundle else "voicebox") or "voicebox"
+
+
+def resolve_tts_for_apply(
+    *,
+    bundle: Optional[PersonaBundle] = None,
+    selected_voice: Optional[Any] = None,
+    voices: Iterable[Any] = (),
+    explicit: bool = False,
+) -> Dict[str, Any]:
+    """Pick TTS for a speaking-persona apply.
+
+    Policy (Promax 2026-09-22): Voicebox/Qwen can hang for minutes. Prefer a
+    Fish Audio clone that name-matches the persona. An *explicit* Voicebox
+    clone selection (titlebar ``Cartman · Voicebox``) still forces local GPU.
+    """
+    catalog = [_voice_as_info(v) for v in voices]
+    selected = _voice_as_info(selected_voice) if selected_voice is not None else None
+
+    if explicit and selected and selected.id and selected.id != "default":
+        return {
+            "provider": selected.provider or "voicebox",
+            "voice_id": selected.id,
+            "voice_name": selected.name or selected.id,
+            "reason": "explicit-selection",
+        }
+
+    names: List[str] = []
+    if bundle:
+        names.extend([bundle.name, bundle.id, bundle.voice_name])
+    if selected:
+        names.extend([selected.name, selected.id])
+
+    if bundle and is_fish_provider(bundle.provider) and bundle.voice_id and bundle.voice_id != "default":
+        fish_exact = next(
+            (
+                v
+                for v in catalog
+                if is_fish_provider(v.provider) and v.id == bundle.voice_id and _usable_clone(v)
+            ),
+            None,
+        )
+        return {
+            "provider": PREFERRED_TTS_PROVIDER,
+            "voice_id": bundle.voice_id,
+            "voice_name": (fish_exact.name if fish_exact else None) or bundle.voice_name or bundle.name,
+            "reason": "bundle-fish-id",
+        }
+
+    fish_twins = find_name_matching_clones(names, catalog, fish_only=True)
+    if fish_twins:
+        twin = fish_twins[0]
+        return {
+            "provider": twin.provider or PREFERRED_TTS_PROVIDER,
+            "voice_id": twin.id,
+            "voice_name": twin.name,
+            "reason": "fish-twin-by-name",
+        }
+
+    if selected and selected.id and selected.id != "default":
+        return {
+            "provider": selected.provider or "voicebox",
+            "voice_id": selected.id,
+            "voice_name": selected.name or selected.id,
+            "reason": "selected-voice",
+        }
+
+    if bundle and bundle.voice_id and bundle.voice_id != "default":
+        return {
+            "provider": bundle.provider or "voicebox",
+            "voice_id": bundle.voice_id,
+            "voice_name": bundle.voice_name or bundle.name,
+            "reason": "bundle-stored-voice",
+        }
+
+    vb_twins = find_name_matching_clones(names, catalog, fish_only=False)
+    if vb_twins:
+        twin = vb_twins[0]
+        return {
+            "provider": twin.provider or "voicebox",
+            "voice_id": twin.id,
+            "voice_name": twin.name,
+            "reason": "voicebox-twin-by-name",
+        }
+
+    return {
+        "provider": None,
+        "voice_id": None,
+        "voice_name": None,
+        "reason": "no-voice",
     }
 
 
