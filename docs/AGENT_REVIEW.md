@@ -116,7 +116,7 @@ Not treated as a license to patch Nous: `atomic_roundtrip_yaml_update` and `rend
 | Titlebar pick `Name · Voicebox` clone | Same session overlay; explicit local GPU (slow path; user-forced) | Same: current session, next reply; not sticky |
 | Titlebar Standard Hermes | Restore stash, or Edge stock if no usable stash. Never `voicebox.voice: default` | **No** `host.newChat`. Next reply uses stock profile soul |
 | User New Chat while overlay active | Restore stash (or Edge stock); plugin watches **`focusedStoredSessionId` non-null → null**, not `focusedSessionId` churn | **No** extra `newChat` — user already has the blank |
-| Plugin / Desktop startup | `POST /session/reset-all`: restore stash; leftover Studio personality cleared; Voicebox `voice: default` → Edge stock. No auto-apply | `newChat` only if a leftover overlay was actually restored |
+| Plugin / Desktop startup | `POST /session/reset-all`: restore stash; leftover Studio personality cleared; Voicebox `voice: default` → Edge stock. No auto-apply | **No** `host.newChat` — Studio never starts sessions |
 | Companion refresh | Same startup reset. Never auto-applies a Studio persona | — |
 | Studio Save Persona | Bundle under `personas/` | Not auto-applied until titlebar |
 | Studio Clone | Provider clone **and** matching persona bundle | Not auto-applied |

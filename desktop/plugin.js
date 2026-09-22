@@ -237,15 +237,6 @@ function subscribeFocusedSession(onChange) {
   return () => clearInterval(timer);
 }
 
-async function startNewChat(profile) {
-  if (typeof host.newChat !== 'function') return;
-  try {
-    await host.newChat(profile);
-  } catch (err) {
-    console.warn('[PersonaStudio] host.newChat failed:', err);
-  }
-}
-
 // SESSION_WATCH_BEGIN
 /**
  * Promax double-blank race (Charles 2026-09-22):
@@ -451,13 +442,8 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let restored = false;
       try {
-        const res = await fetch(`${API_BASE}/session/reset-all`, { method: 'POST' });
-        if (res.ok) {
-          const data = await res.json();
-          restored = (data.profiles || []).some((p) => p.restored || p.leftover_personality_cleared);
-        }
+        await fetch(`${API_BASE}/session/reset-all`, { method: 'POST' });
       } catch (err) {
         console.warn('[PersonaStudio] startup session reset-all failed:', err);
       }
@@ -468,11 +454,6 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       });
       setActiveId('default');
       window.__ACTIVE_PERSONA_STUDIO__ = null;
-      if (restored) {
-        await startNewChat(focusedProfile());
-        overlayRef.current.sessionId = focusedSessionId();
-        overlayRef.current.storedId = focusedStoredSessionId();
-      }
     })();
     return () => { cancelled = true; };
   }, []);

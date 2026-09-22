@@ -944,6 +944,7 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertNotIn("startNewChat", select)
         self.assertNotIn("shouldReloadSessionAfterApply", self.src)
         self.assertNotIn("host.newChat", select)
+        self.assertNotIn("startNewChat", self.src)
 
 
 class TestInstallHygiene(IsolatedHermesHomeTest):
