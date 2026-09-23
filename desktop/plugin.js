@@ -232,7 +232,9 @@ function hydrateFormFromPack(pack) {
     selectedVoice: pack.voice_id && pack.voice_id !== 'default' ? pack.voice_id : '',
     speed: pack.speed != null ? pack.speed : 1.0,
     temperature: pack.temperature != null ? pack.temperature : 0.7,
-    characterStrength: characterStrengthPercent(pack.character_strength)
+    characterStrength: characterStrengthPercent(pack.character_strength),
+    // Voice model = Voicebox default_engine / Fish model id (Synthesis engine dropdown).
+    engine: pack.engine || pack.default_engine || ''
   };
 }
 
@@ -258,7 +260,8 @@ function personaSaveRequest(fields) {
     voice_name: fields.voiceName || fields.selectedVoice || resolvedName,
     speed: parseFloat(fields.speed),
     temperature: parseFloat(fields.temperature),
-    character_strength: characterStrengthPercent(fields.characterStrength)
+    character_strength: characterStrengthPercent(fields.characterStrength),
+    engine: fields.engine || fields.selectedModel || (selectedPack && selectedPack.engine) || null
   };
   if (isUpdate) body.id = id;
   return {
@@ -1306,7 +1309,11 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
         setModels(mList);
         if (mList.length > 0) {
           const rec = mList.find(m => m.recommended) || mList[0];
-          setSelectedModel(rec.id);
+          // Keep an in-list selection (incl. pack-hydrated engine). Only default to recommended when unset.
+          setSelectedModel((prev) => {
+            if (prev && mList.some((m) => m.id === prev)) return prev;
+            return rec.id;
+          });
         }
       }
 
@@ -1368,6 +1375,15 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
     setCharacterStrength(hydrated.characterStrength);
     setSpeed(hydrated.speed);
     setTemperature(hydrated.temperature);
+    // Prefer pack.engine; else Voicebox profile default_engine for the bound voice.
+    const voiceEngine = (() => {
+      if (hydrated.engine) return hydrated.engine;
+      const vid = hydrated.selectedVoice;
+      if (!vid) return '';
+      const match = (voices || []).find((v) => v && v.id === vid);
+      return (match && (match.default_engine || (match.extra && match.extra.engine))) || '';
+    })();
+    if (voiceEngine) setSelectedModel(voiceEngine);
     if (hydrated.provider && hydrated.provider !== provider) {
       pendingVoiceRef.current = hydrated.selectedVoice;
       setProvider(hydrated.provider);
@@ -1521,7 +1537,9 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
       voiceName: chosenV ? chosenV.name : selectedVoice,
       speed: speed,
       temperature: temperature,
-      characterStrength: characterStrength
+      characterStrength: characterStrength,
+      engine: selectedModel,
+      selectedModel: selectedModel
     });
     if (plan.error) return { ok: false, error: plan.error, plan };
     const res = await fetch(`${API_BASE}${plan.url}`, {
@@ -2030,7 +2048,7 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
                 jsxs('div', {
                   className: 'space-y-1',
                   children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Synthesis engine' }),
+                    jsx('label', { className: 'text-xs font-medium', children: 'Synthesis engine (saved with pack)' }),
                     jsx('select', {
                       value: selectedModel,
                       onChange: (e) => setSelectedModel(e.target.value),

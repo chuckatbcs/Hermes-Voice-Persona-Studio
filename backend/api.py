@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from .providers.base import BaseTTSProvider, VoiceInfo
 from .providers.fish_audio import FishAudioProvider
 from .providers.voicebox import VoiceboxProvider
-from .storage import PersonaBundle, PersonaStorage
+from .storage import PersonaBundle, PersonaStorage, normalize_pack_engine
 from . import bot_profiles
 from . import persona_sync
 from . import session_overlay
@@ -26,6 +26,25 @@ PROVIDERS: Dict[str, BaseTTSProvider] = {
     "fish_audio": fish_provider,
     "voicebox": voicebox_provider,
 }
+
+
+def _sync_voicebox_engine(provider: str, voice_id: str, engine: Optional[str]) -> None:
+    """Best-effort: write pack engine onto the Voicebox profile default_engine.
+
+    Fish preferred models stay on the pack only — do not PUT a Fish model id
+    onto a Voicebox profile.
+    """
+    if not engine:
+        return
+    if str(provider or "").strip().lower() not in ("voicebox", "vb"):
+        return
+    vid = str(voice_id or "").strip()
+    if not vid or vid in ("default", "none", "null"):
+        return
+    try:
+        voicebox_provider.update_default_engine(vid, engine)
+    except Exception as e:
+        print(f"[PersonaStudio] Voicebox engine sync skipped: {e}")
 
 
 class AuditionRequest(BaseModel):
@@ -48,6 +67,7 @@ class CreatePersonaRequest(BaseModel):
     speed: float = 1.0
     temperature: float = 0.7
     character_strength: Optional[Any] = 25
+    engine: Optional[str] = None
     tags: Optional[List[str]] = None
 
 
@@ -61,6 +81,7 @@ class UpdatePersonaRequest(BaseModel):
     speed: Optional[float] = None
     temperature: Optional[float] = None
     character_strength: Optional[Any] = None
+    engine: Optional[str] = None
     tags: Optional[List[str]] = None
 
 
@@ -311,6 +332,7 @@ def resolve_tts(req: ResolveTtsRequest) -> Dict[str, Any]:
 def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
     pid = req.id or persona_sync.slugify_persona_id(req.name)
     prompt = (req.system_prompt or "").strip() or persona_sync.fallback_system_prompt(req.name)
+    engine = normalize_pack_engine(req.engine)
     bundle = PersonaBundle(
         id=pid,
         name=req.name,
@@ -322,9 +344,11 @@ def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
         speed=req.speed,
         temperature=req.temperature,
         character_strength=persona_sync.character_strength_percent(req.character_strength),
+        engine=engine,
         tags=req.tags or [],
     )
     saved = storage.save_persona(bundle)
+    _sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)
     return {"ok": True, "created": True, "persona": saved.to_dict()}
 
 
@@ -352,9 +376,12 @@ def update_persona(persona_id: str, req: UpdatePersonaRequest) -> Dict[str, Any]
         existing.temperature = float(req.temperature)
     if req.character_strength is not None:
         existing.character_strength = persona_sync.character_strength_percent(req.character_strength)
+    if req.engine is not None:
+        existing.engine = normalize_pack_engine(req.engine)
     if req.tags is not None:
         existing.tags = req.tags
     saved = storage.save_persona(existing)
+    _sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)
     data = saved.to_dict()
     data["character_strength"] = persona_sync.character_strength_percent(saved.character_strength)
     return {"ok": True, "updated": True, "persona": data}

@@ -12,6 +12,14 @@ from typing import Any, Dict, List, Optional
 _STRENGTH_LEGACY = {"soft": 25, "medium": 55, "strong": 85}
 
 
+def normalize_pack_engine(engine: Any) -> Optional[str]:
+    """Voice model id (Voicebox default_engine or Fish model), or None if unset."""
+    if engine in (None, ""):
+        return None
+    text = str(engine).strip()
+    return text or None
+
+
 def _coerce_character_strength_percent(value: Any) -> int:
     """Migrate legacy soft/medium/strong labels; clamp to 0–100."""
     if value is None or value == "":
@@ -45,6 +53,7 @@ class PersonaBundle:
     speed: float = 1.0
     temperature: float = 0.7
     character_strength: int = 25
+    engine: Optional[str] = None  # Voicebox default_engine / Fish model id
     created_at: float = 0.0
     updated_at: float = 0.0
     tags: Optional[List[str]] = None
@@ -65,6 +74,7 @@ class PersonaBundle:
             speed=float(data.get("speed", 1.0)),
             temperature=float(data.get("temperature", 0.7)),
             character_strength=_coerce_character_strength_percent(data.get("character_strength")),
+            engine=normalize_pack_engine(data.get("engine")),
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
             tags=data.get("tags") or [],

@@ -105,6 +105,124 @@ class TestPersonaStorage(IsolatedHermesHomeTest):
         self.assertIn('status_code=404, detail=f"Persona \'{persona_id}\' not found"', api_src)
         self.assertIn('"updated": True', api_src)
 
+    def test_storage_persists_engine_on_pack(self):
+        """Voice model (Synthesis engine) must survive Save → reload."""
+        from backend.storage import normalize_pack_engine
+
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        storage.save_persona(
+            PersonaBundle(
+                id="amanda",
+                name="Amanda",
+                avatar="🎙️",
+                system_prompt="Warm supportive conversational manner while doing the job.",
+                provider="voicebox",
+                voice_id="33d87aca-4281-479a-a320-623633377589",
+                voice_name="Amanda",
+                character_strength=25,
+                engine="chatterbox_turbo",
+            )
+        )
+        loaded = storage.get_persona("amanda")
+        self.assertEqual(loaded.engine, "chatterbox_turbo")
+        raw = (self.home / "personas" / "amanda" / "manifest.json").read_text(encoding="utf-8")
+        self.assertIn("chatterbox_turbo", raw)
+        loaded.engine = "chatterbox"
+        storage.save_persona(loaded)
+        again = storage.get_persona("amanda")
+        self.assertEqual(again.engine, "chatterbox")
+
+        missing = PersonaBundle.from_dict(
+            {
+                "id": "legacy",
+                "name": "Legacy",
+                "avatar": "🤖",
+                "system_prompt": "enough text for a real prompt here",
+                "provider": "voicebox",
+                "voice_id": "v",
+                "voice_name": "V",
+            }
+        )
+        self.assertIsNone(missing.engine)
+        self.assertIsNone(normalize_pack_engine(""))
+        self.assertIsNone(normalize_pack_engine("   "))
+        self.assertEqual(normalize_pack_engine("  qwen_fast  "), "qwen_fast")
+
+    def test_api_create_update_persists_engine_and_syncs_voicebox_only(self):
+        from unittest.mock import patch
+
+        from backend import api
+        from backend.api import CreatePersonaRequest, UpdatePersonaRequest
+
+        prompt = "Warm supportive conversational manner while doing the job."
+        created = PersonaBundle(
+            id="amanda",
+            name="Amanda",
+            avatar="🎙️",
+            system_prompt=prompt,
+            provider="voicebox",
+            voice_id="voice-1",
+            voice_name="Amanda",
+            engine="chatterbox_turbo",
+        )
+        with patch.object(api, "storage") as storage, patch.object(api, "voicebox_provider") as vb:
+            storage.save_persona.return_value = created
+            result = api.save_persona(
+                CreatePersonaRequest(
+                    name="Amanda",
+                    avatar="🎙️",
+                    system_prompt=prompt,
+                    provider="voicebox",
+                    voice_id="voice-1",
+                    voice_name="Amanda",
+                    engine="chatterbox_turbo",
+                )
+            )
+            self.assertTrue(result["created"])
+            self.assertEqual(result["persona"]["engine"], "chatterbox_turbo")
+            self.assertEqual(storage.save_persona.call_args.args[0].engine, "chatterbox_turbo")
+            vb.update_default_engine.assert_called_once_with("voice-1", "chatterbox_turbo")
+
+            storage.get_persona.return_value = created
+            storage.save_persona.return_value = PersonaBundle(
+                id="amanda",
+                name="Amanda",
+                avatar="🎙️",
+                system_prompt=prompt,
+                provider="voicebox",
+                voice_id="voice-1",
+                voice_name="Amanda",
+                engine="chatterbox",
+            )
+            vb.reset_mock()
+            updated = api.update_persona("amanda", UpdatePersonaRequest(engine="chatterbox"))
+            self.assertTrue(updated["updated"])
+            self.assertEqual(updated["persona"]["engine"], "chatterbox")
+            vb.update_default_engine.assert_called_once_with("voice-1", "chatterbox")
+
+            fish = PersonaBundle(
+                id="amanda",
+                name="Amanda",
+                avatar="🎙️",
+                system_prompt=prompt,
+                provider="fish_audio",
+                voice_id="fish-1",
+                voice_name="Amanda",
+                engine="s2.1-pro-free",
+            )
+            storage.get_persona.return_value = fish
+            storage.save_persona.return_value = fish
+            vb.reset_mock()
+            api.update_persona("amanda", UpdatePersonaRequest(engine="s2.1-pro-free"))
+            vb.update_default_engine.assert_not_called()
+
+        api_src = Path(__file__).resolve().parent.joinpath("backend", "api.py").read_text(encoding="utf-8")
+        self.assertIn("engine: Optional[str] = None", api_src)
+        self.assertIn("existing.engine = normalize_pack_engine(req.engine)", api_src)
+        self.assertIn("engine=engine", api_src)
+        self.assertIn("_sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)", api_src)
+        self.assertIn('not in ("voicebox", "vb")', api_src)
+
     def test_storage_skips_dotfiles(self):
         root = self.home / "personas"
         storage = PersonaStorage(root_dir=str(root))
@@ -123,6 +241,43 @@ class TestProvidersOffline(unittest.TestCase):
     def test_voicebox_provider_name(self):
         provider = VoiceboxProvider()
         self.assertEqual(provider.name, "voicebox")
+
+    def test_voicebox_update_default_engine_puts_profile(self):
+        from unittest.mock import MagicMock, patch
+
+        provider = VoiceboxProvider(base_url="http://voicebox.test")
+        with patch("backend.providers.voicebox.requests.put") as put, patch(
+            "backend.providers.voicebox.requests.get"
+        ) as get:
+            ok = MagicMock(status_code=200, text="")
+            put.return_value = ok
+            self.assertTrue(provider.update_default_engine("voice-1", "chatterbox_turbo"))
+            put.assert_called_once_with(
+                "http://voicebox.test/profiles/voice-1",
+                json={"default_engine": "chatterbox_turbo", "preset_engine": "chatterbox_turbo"},
+                timeout=5,
+            )
+            get.assert_not_called()
+
+            put.reset_mock()
+            put.return_value = ok
+            self.assertTrue(provider.update_default_engine("voice-1", "qwen_fast"))
+            self.assertEqual(put.call_args.kwargs["json"]["default_engine"], "qwen")
+
+            put.reset_mock()
+            get.reset_mock()
+            rejected = MagicMock(status_code=422, text="name required")
+            put.side_effect = [rejected, ok]
+            get.return_value = MagicMock(status_code=200)
+            get.return_value.json.return_value = {"id": "voice-1", "name": "Amanda"}
+            self.assertTrue(provider.update_default_engine("voice-1", "chatterbox"))
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(put.call_count, 2)
+            self.assertEqual(put.call_args.kwargs["json"]["name"], "Amanda")
+            self.assertEqual(put.call_args.kwargs["json"]["default_engine"], "chatterbox")
+
+            self.assertFalse(provider.update_default_engine("default", "chatterbox"))
+            self.assertFalse(provider.update_default_engine("voice-1", ""))
 
 
 class TestPersonaSync(IsolatedHermesHomeTest):
@@ -1454,6 +1609,13 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         save = self.src[start:end]
         self.assertIn("personaSaveRequest", save)
         self.assertIn("plan.method", save)
+        self.assertIn("engine: selectedModel", save)
+        self.assertIn("selectedModel: selectedModel", save)
+        self.assertIn("setSelectedModel((prev) => {", self.src)
+        self.assertIn("mList.some((m) => m.id === prev)", self.src)
+        self.assertIn("pack.engine || pack.default_engine", self.src)
+        self.assertIn("match.default_engine", self.src)
+        self.assertIn("Synthesis engine (saved with pack)", self.src)
         self.assertNotIn("onOpenChange(false)", save)
         self.assertNotIn("Please enter a name for the Persona.", save.split("plan.error")[0])
         self.assertNotIn("host.toast", self.src)
@@ -1537,7 +1699,8 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               voice_id: 'c9da87b0-19be-49c4-ab44-01cb7943f5c4',
               speed: 1.05,
               temperature: 0.8,
-              character_strength: 25
+              character_strength: 25,
+              engine: 'chatterbox_turbo'
             };
             const hydrated = hydrateFormFromPack(pack);
             const unnamed = personaSaveRequest({
@@ -1551,7 +1714,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               voiceName: 'Cartman',
               speed: 1.05,
               temperature: 0.8,
-              characterStrength: 100
+              characterStrength: 100,
+              engine: 'chatterbox',
+              selectedModel: 'chatterbox'
             });
             const created = personaSaveRequest({
               editingId: '',
@@ -1564,7 +1729,13 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               voiceName: 'abc',
               speed: 1,
               temperature: 0.7,
-              characterStrength: 40
+              characterStrength: 40,
+              selectedModel: 's2.1-pro-free'
+            });
+            const fromVoiceDefault = hydrateFormFromPack({
+              ...pack,
+              engine: '',
+              default_engine: 'qwen'
             });
             const missing = personaSaveRequest({
               editingId: '',
@@ -1592,18 +1763,22 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               voice_name: 'Hermes eric_cartman',
               character_strength: 100
             });
-            console.log(JSON.stringify({ hydrated, unnamed, created, missing, notified, calls, noApi, stock, live }));
+            console.log(JSON.stringify({ hydrated, unnamed, created, missing, fromVoiceDefault, notified, calls, noApi, stock, live }));
             """,
         )
         self.assertEqual(data["hydrated"]["name"], "Eric Cartman")
         self.assertEqual(data["hydrated"]["characterStrength"], 25)
         self.assertEqual(data["hydrated"]["selectedVoice"], "c9da87b0-19be-49c4-ab44-01cb7943f5c4")
+        self.assertEqual(data["hydrated"]["engine"], "chatterbox_turbo")
+        self.assertEqual(data["fromVoiceDefault"]["engine"], "qwen")
         self.assertEqual(data["unnamed"]["method"], "PUT")
         self.assertEqual(data["unnamed"]["url"], "/personas/cartman")
         self.assertEqual(data["unnamed"]["body"]["name"], "Eric Cartman")
         self.assertEqual(data["unnamed"]["body"]["character_strength"], 100)
+        self.assertEqual(data["unnamed"]["body"]["engine"], "chatterbox")
         self.assertEqual(data["created"]["method"], "POST")
         self.assertEqual(data["created"]["url"], "/personas")
+        self.assertEqual(data["created"]["body"]["engine"], "s2.1-pro-free")
         self.assertIn("error", data["missing"])
         self.assertTrue(data["notified"])
         self.assertEqual(data["calls"][0]["kind"], "success")
