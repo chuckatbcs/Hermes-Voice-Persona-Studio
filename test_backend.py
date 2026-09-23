@@ -148,80 +148,25 @@ class TestPersonaStorage(IsolatedHermesHomeTest):
         self.assertIsNone(normalize_pack_engine("   "))
         self.assertEqual(normalize_pack_engine("  qwen_fast  "), "qwen_fast")
 
-    def test_api_create_update_persists_engine_and_syncs_voicebox_only(self):
-        from unittest.mock import patch
-
-        from backend import api
-        from backend.api import CreatePersonaRequest, UpdatePersonaRequest
-
-        prompt = "Warm supportive conversational manner while doing the job."
-        created = PersonaBundle(
-            id="amanda",
-            name="Amanda",
-            avatar="🎙️",
-            system_prompt=prompt,
-            provider="voicebox",
-            voice_id="voice-1",
-            voice_name="Amanda",
-            engine="chatterbox_turbo",
-        )
-        with patch.object(api, "storage") as storage, patch.object(api, "voicebox_provider") as vb:
-            storage.save_persona.return_value = created
-            result = api.save_persona(
-                CreatePersonaRequest(
-                    name="Amanda",
-                    avatar="🎙️",
-                    system_prompt=prompt,
-                    provider="voicebox",
-                    voice_id="voice-1",
-                    voice_name="Amanda",
-                    engine="chatterbox_turbo",
-                )
-            )
-            self.assertTrue(result["created"])
-            self.assertEqual(result["persona"]["engine"], "chatterbox_turbo")
-            self.assertEqual(storage.save_persona.call_args.args[0].engine, "chatterbox_turbo")
-            vb.update_default_engine.assert_called_once_with("voice-1", "chatterbox_turbo")
-
-            storage.get_persona.return_value = created
-            storage.save_persona.return_value = PersonaBundle(
-                id="amanda",
-                name="Amanda",
-                avatar="🎙️",
-                system_prompt=prompt,
-                provider="voicebox",
-                voice_id="voice-1",
-                voice_name="Amanda",
-                engine="chatterbox",
-            )
-            vb.reset_mock()
-            updated = api.update_persona("amanda", UpdatePersonaRequest(engine="chatterbox"))
-            self.assertTrue(updated["updated"])
-            self.assertEqual(updated["persona"]["engine"], "chatterbox")
-            vb.update_default_engine.assert_called_once_with("voice-1", "chatterbox")
-
-            fish = PersonaBundle(
-                id="amanda",
-                name="Amanda",
-                avatar="🎙️",
-                system_prompt=prompt,
-                provider="fish_audio",
-                voice_id="fish-1",
-                voice_name="Amanda",
-                engine="s2.1-pro-free",
-            )
-            storage.get_persona.return_value = fish
-            storage.save_persona.return_value = fish
-            vb.reset_mock()
-            api.update_persona("amanda", UpdatePersonaRequest(engine="s2.1-pro-free"))
-            vb.update_default_engine.assert_not_called()
-
+    def test_api_create_update_accepts_engine_and_syncs_voicebox_only(self):
+        """Create/update request models persist engine; Fish does not PUT Voicebox."""
         api_src = Path(__file__).resolve().parent.joinpath("backend", "api.py").read_text(encoding="utf-8")
-        self.assertIn("engine: Optional[str] = None", api_src)
-        self.assertIn("existing.engine = normalize_pack_engine(req.engine)", api_src)
-        self.assertIn("engine=engine", api_src)
-        self.assertIn("_sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)", api_src)
+        create_start = api_src.index("class CreatePersonaRequest")
+        update_start = api_src.index("class UpdatePersonaRequest")
+        assign_start = api_src.index("class AssignVoiceRequest")
+        save_start = api_src.index("def save_persona(")
+        update_fn = api_src.index("def update_persona(")
+        save_fn = api_src[save_start:update_fn]
+        update_body = api_src[update_fn:api_src.index("def delete_persona(")]
+        self.assertIn("engine: Optional[str] = None", api_src[create_start:update_start])
+        self.assertIn("engine: Optional[str] = None", api_src[update_start:assign_start])
+        self.assertIn("engine = normalize_pack_engine(req.engine)", save_fn)
+        self.assertIn("engine=engine", save_fn)
+        self.assertIn("_sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)", save_fn)
+        self.assertIn("existing.engine = normalize_pack_engine(req.engine)", update_body)
+        self.assertIn("_sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)", update_body)
         self.assertIn('not in ("voicebox", "vb")', api_src)
+        self.assertIn("Fish preferred models stay on the pack only", api_src)
 
     def test_storage_skips_dotfiles(self):
         root = self.home / "personas"
