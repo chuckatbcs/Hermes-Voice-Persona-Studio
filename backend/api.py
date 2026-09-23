@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import base64
-import os
-import uuid
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -13,6 +11,10 @@ from .providers.fish_audio import FishAudioProvider
 from .providers.voicebox import VoiceboxProvider
 from .storage import PersonaBundle, PersonaStorage
 from . import bot_profiles
+from . import persona_sync
+from . import session_overlay
+from .config_io import get_dotted, load_yaml
+from .paths import config_path_for_profile
 
 router = APIRouter(prefix="/api/studio", tags=["PersonaStudio"])
 storage = PersonaStorage()
@@ -39,12 +41,26 @@ class CreatePersonaRequest(BaseModel):
     id: Optional[str] = None
     name: str
     avatar: str = "🤖"
-    system_prompt: str
+    system_prompt: str = ""
     provider: str = "voicebox"
     voice_id: str
     voice_name: str
     speed: float = 1.0
     temperature: float = 0.7
+    character_strength: Optional[Any] = 25
+    tags: Optional[List[str]] = None
+
+
+class UpdatePersonaRequest(BaseModel):
+    name: Optional[str] = None
+    avatar: Optional[str] = None
+    system_prompt: Optional[str] = None
+    provider: Optional[str] = None
+    voice_id: Optional[str] = None
+    voice_name: Optional[str] = None
+    speed: Optional[float] = None
+    temperature: Optional[float] = None
+    character_strength: Optional[Any] = None
     tags: Optional[List[str]] = None
 
 
@@ -57,6 +73,24 @@ class AssignVoiceRequest(BaseModel):
 class SetPersonaRequest(BaseModel):
     persona_name: str
     persona_prompt: str
+
+
+class ResolveTtsRequest(BaseModel):
+    persona_id: Optional[str] = None
+    voice_id: Optional[str] = None
+    provider: Optional[str] = None
+    explicit: bool = False
+    profile_id: Optional[str] = None
+
+
+class SessionApplyRequest(BaseModel):
+    persona_name: str
+    persona_prompt: str
+    provider: Optional[str] = None
+    voice_id: Optional[str] = None
+    voice_name: Optional[str] = None
+    persona_id: Optional[str] = None
+    character_strength: Optional[Any] = None
 
 
 @router.get("/status")
@@ -134,6 +168,7 @@ async def resample_voice(
 
 @router.get("/voices")
 def list_voices(provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List voices. Omit provider to return Fish + Voicebox together."""
     out: List[Dict[str, Any]] = []
     target_providers = [PROVIDERS[provider]] if provider and provider in PROVIDERS else PROVIDERS.values()
 
@@ -194,33 +229,135 @@ async def clone_voice(
             engine=engine,
             reference_text=reference_text,
         )
-        return {"ok": True, "voice": vinfo.to_dict()}
+        persona = persona_sync.ensure_persona_for_voice(storage, vinfo)
+        return {
+            "ok": True,
+            "voice": vinfo.to_dict(),
+            "persona": persona.to_dict() if persona else None,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/personas")
-def list_personas() -> List[Dict[str, Any]]:
-    return [p.to_dict() for p in storage.list_personas()]
+def list_personas(listable: bool = False) -> List[Dict[str, Any]]:
+    voices = persona_sync.collect_provider_voices(PROVIDERS) if listable else ()
+    out: List[Dict[str, Any]] = []
+    for bundle in storage.list_personas():
+        data = bundle.to_dict()
+        data["character_strength"] = persona_sync.character_strength_percent(
+            bundle.character_strength
+        )
+        data["listable"] = persona_sync.is_listable_persona_pack(bundle, voices or None)
+        if listable and not data["listable"]:
+            continue
+        out.append(data)
+    return out
+
+
+@router.post("/sync-from-voices")
+def sync_from_voices() -> Dict[str, Any]:
+    """Idempotently create/update persona bundles for existing TTS clones."""
+    voices = persona_sync.collect_provider_voices(PROVIDERS)
+    return persona_sync.sync_personas_from_voices(storage, voices)
+
+
+def _fish_clone_map_for_profile(profile_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not profile_id:
+        return None
+    path = config_path_for_profile(profile_id)
+    if not path.exists():
+        return None
+    try:
+        clones = get_dotted(load_yaml(path), "tts.providers.fish.clones")
+    except Exception:
+        return None
+    return clones if isinstance(clones, dict) else None
+
+
+@router.post("/resolve-tts")
+def resolve_tts(req: ResolveTtsRequest) -> Dict[str, Any]:
+    """Prefer a Fish clone twin unless the caller explicitly selected Voicebox."""
+    voices = persona_sync.collect_provider_voices(PROVIDERS)
+    bundle = storage.get_persona(req.persona_id) if req.persona_id else None
+    selected = None
+    if req.voice_id:
+        for info in voices:
+            if info.id == req.voice_id and (
+                not req.provider or info.provider == req.provider or (
+                    persona_sync.is_fish_provider(req.provider) and persona_sync.is_fish_provider(info.provider)
+                )
+            ):
+                selected = info
+                break
+        if selected is None:
+            selected = VoiceInfo(
+                id=req.voice_id,
+                name=req.voice_id,
+                provider=req.provider or "voicebox",
+                voice_type="cloned",
+            )
+    result = persona_sync.resolve_tts_for_apply(
+        bundle=bundle,
+        selected_voice=selected,
+        voices=voices,
+        explicit=req.explicit,
+        clone_map=_fish_clone_map_for_profile(req.profile_id),
+    )
+    return {"ok": True, **result}
 
 
 @router.post("/personas")
 def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
-    pid = req.id or req.name.lower().replace(" ", "_")
+    pid = req.id or persona_sync.slugify_persona_id(req.name)
+    prompt = (req.system_prompt or "").strip() or persona_sync.fallback_system_prompt(req.name)
     bundle = PersonaBundle(
         id=pid,
         name=req.name,
         avatar=req.avatar,
-        system_prompt=req.system_prompt,
+        system_prompt=prompt,
         provider=req.provider,
         voice_id=req.voice_id,
         voice_name=req.voice_name,
         speed=req.speed,
         temperature=req.temperature,
+        character_strength=persona_sync.character_strength_percent(req.character_strength),
         tags=req.tags or [],
     )
     saved = storage.save_persona(bundle)
-    return {"ok": True, "persona": saved.to_dict()}
+    return {"ok": True, "created": True, "persona": saved.to_dict()}
+
+
+@router.put("/personas/{persona_id}")
+def update_persona(persona_id: str, req: UpdatePersonaRequest) -> Dict[str, Any]:
+    """Update an existing pack in place (Character strength, prompt, voice)."""
+    existing = storage.get_persona(persona_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Persona '{persona_id}' not found")
+    if req.name is not None and str(req.name).strip():
+        existing.name = str(req.name).strip()
+    if req.avatar is not None:
+        existing.avatar = req.avatar or existing.avatar
+    if req.system_prompt is not None:
+        existing.system_prompt = req.system_prompt
+    if req.provider is not None:
+        existing.provider = req.provider
+    if req.voice_id is not None:
+        existing.voice_id = req.voice_id
+    if req.voice_name is not None:
+        existing.voice_name = req.voice_name
+    if req.speed is not None:
+        existing.speed = float(req.speed)
+    if req.temperature is not None:
+        existing.temperature = float(req.temperature)
+    if req.character_strength is not None:
+        existing.character_strength = persona_sync.character_strength_percent(req.character_strength)
+    if req.tags is not None:
+        existing.tags = req.tags
+    saved = storage.save_persona(existing)
+    data = saved.to_dict()
+    data["character_strength"] = persona_sync.character_strength_percent(saved.character_strength)
+    return {"ok": True, "updated": True, "persona": data}
 
 
 @router.delete("/personas/{persona_id}")
@@ -257,5 +394,54 @@ def set_bot_persona(profile_id: str, req: SetPersonaRequest) -> Dict[str, Any]:
             persona_name=req.persona_name,
             persona_prompt=req.persona_prompt,
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/session/state")
+def get_session_overlay_state(profile_id: Optional[str] = None) -> Dict[str, Any]:
+    if profile_id:
+        return session_overlay.overlay_status(profile_id)
+    return session_overlay.load_session_state()
+
+
+@router.post("/session/reset-all")
+def reset_all_session_overlays() -> Dict[str, Any]:
+    """Clear leftover Studio overlays on plugin startup. Does not auto-apply anything."""
+    try:
+        return session_overlay.reset_all_session_overlays()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/profiles/{profile_id}/session/apply")
+def apply_session_overlay(profile_id: str, req: SessionApplyRequest) -> Dict[str, Any]:
+    """Apply persona + voice for this chat session; stash stock Hermes for the next new chat."""
+    try:
+        strength = req.character_strength
+        if strength in (None, "") and req.persona_id:
+            bundle = storage.get_persona(req.persona_id)
+            if bundle is not None:
+                strength = bundle.character_strength
+        return session_overlay.apply_session_overlay(
+            profile_id,
+            persona_name=req.persona_name,
+            persona_prompt=req.persona_prompt,
+            provider=req.provider,
+            voice_id=req.voice_id,
+            voice_name=req.voice_name,
+            character_strength=strength,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/profiles/{profile_id}/session/reset")
+def reset_session_overlay(profile_id: str) -> Dict[str, Any]:
+    """Restore stashed stock Hermes personality + TTS for the next session."""
+    try:
+        return session_overlay.reset_session_overlay(profile_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

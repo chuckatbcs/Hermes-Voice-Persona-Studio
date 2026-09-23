@@ -9,6 +9,29 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_STRENGTH_LEGACY = {"soft": 25, "medium": 55, "strong": 85}
+
+
+def _coerce_character_strength_percent(value: Any) -> int:
+    """Migrate legacy soft/medium/strong labels; clamp to 0–100."""
+    if value is None or value == "":
+        return 25
+    if isinstance(value, bool):
+        return 25
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _STRENGTH_LEGACY:
+            return _STRENGTH_LEGACY[lowered]
+        try:
+            value = float(lowered)
+        except ValueError:
+            return 25
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 25
+    return max(0, min(100, number))
+
 
 @dataclass
 class PersonaBundle:
@@ -21,6 +44,7 @@ class PersonaBundle:
     voice_name: str
     speed: float = 1.0
     temperature: float = 0.7
+    character_strength: int = 25
     created_at: float = 0.0
     updated_at: float = 0.0
     tags: Optional[List[str]] = None
@@ -40,6 +64,7 @@ class PersonaBundle:
             voice_name=data.get("voice_name", data.get("voice_id", "Default")),
             speed=float(data.get("speed", 1.0)),
             temperature=float(data.get("temperature", 0.7)),
+            character_strength=_coerce_character_strength_percent(data.get("character_strength")),
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
             tags=data.get("tags") or [],
@@ -56,6 +81,8 @@ class PersonaStorage:
     def list_personas(self) -> List[PersonaBundle]:
         bundles: List[PersonaBundle] = []
         for path in sorted(self.root_dir.iterdir()):
+            if path.name.startswith("."):
+                continue
             if path.is_dir() and (path / "manifest.json").exists():
                 try:
                     with open(path / "manifest.json", "r", encoding="utf-8") as f:
