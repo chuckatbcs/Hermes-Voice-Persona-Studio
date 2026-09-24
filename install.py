@@ -1,21 +1,43 @@
 #!/usr/bin/env python3
-"""Hermes PersonaStudio — Non-Destructive Installer & Manager."""
+"""Hermes PersonaStudio — Non-Destructive Installer & Manager.
+
+One entry point for Linux and Windows. Linux can persist the companion with
+systemd --user. Windows registers a per-user Startup launcher that starts the
+installed plugin server (not a source checkout path).
+"""
 from __future__ import annotations
 
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
-HERMES_HOME = Path(os.path.expanduser("~/.hermes"))
-HERMES_DESKTOP_PLUGINS = HERMES_HOME / "desktop-plugins" / "hermes-personastudio"
-COMPANION_SERVER_PY = Path(__file__).parent / "server.py"
-USER_SYSTEMD_DIR = Path(os.path.expanduser("~/.config/systemd/user"))
+from backend.paths import hermes_home
+from install_platform import (
+    COMPANION_PORT,
+    MANAGED_MARKER,
+    check_prereqs,
+    companion_state_from,
+    configure_stdio,
+    detect_os,
+    install_windows_startup,
+    print_prereqs,
+    remove_windows_startup,
+    say,
+    windows_startup_folder,
+)
+
+SYSTEMD_MARKER = MANAGED_MARKER
 SYSTEMD_UNIT_NAME = "hermes-personastudio.service"
-SYSTEMD_MARKER = "# Managed-by: hermes-personastudio-install"
-COMPANION_PORT = 17495
+USER_SYSTEMD_DIR = Path(os.path.expanduser("~/.config/systemd/user"))
+REPO_ROOT = Path(__file__).parent
+
+
+def plugin_dest() -> Path:
+    return hermes_home() / "desktop-plugins" / "hermes-personastudio"
 
 
 def _systemd_unit_path() -> Path:
@@ -78,32 +100,71 @@ def remove_companion_systemd_unit() -> bool:
     if not path.exists():
         return False
     if not _unit_is_ours(path):
-        print(f"  ℹ Left systemd unit in place (not Studio-managed): {path}")
+        say("info", f"Left systemd unit in place (not Studio-managed): {path}")
         return False
     try:
         path.unlink()
         _systemctl_user("daemon-reload")
-        print(f"  ✓ Removed systemd user unit {path}")
+        say("ok", f"Removed systemd user unit {path}")
         return True
     except OSError as exc:
-        print(f"  ℹ Could not remove systemd unit: {exc}")
+        say("info", f"Could not remove systemd unit: {exc}")
         return False
 
 
 def kill_companion_port() -> None:
+    """Stop whatever is listening on the companion port. OS-aware."""
+    os_kind = detect_os()
+    if os_kind == "windows":
+        script = (
+            f"$conns = Get-NetTCPConnection -LocalPort {COMPANION_PORT} -State Listen "
+            "-ErrorAction SilentlyContinue; "
+            "if (-not $conns) { exit 3 }; "
+            "$conns | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"
+        )
+        try:
+            result = _run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            say("info", "powershell.exe not found; companion process was not stopped.")
+            return
+        if result.returncode == 0:
+            say("ok", f"Stopped listener on port {COMPANION_PORT}.")
+        else:
+            say("info", f"No listener stopped on port {COMPANION_PORT}.")
+        return
+
     try:
-        cmd = f"lsof -ti:{COMPANION_PORT} | xargs -r kill -9"
-        _run(cmd, shell=True)
-        print("  ✓ Stopped companion server daemon.")
-    except Exception:
-        pass
+        result = _run(
+            ["lsof", "-ti", f":{COMPANION_PORT}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        say("info", "lsof is not installed; companion process was not stopped.")
+        return
+    pids = [part for part in (result.stdout or "").split() if part.isdigit()]
+    if not pids:
+        say("info", f"No listener found on port {COMPANION_PORT}.")
+        return
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except OSError:
+            continue
+    say("ok", f"Stopped companion server daemon on port {COMPANION_PORT}.")
 
 
 def remove_stray_plugin_py(plugin_dir: Path) -> None:
     stray = plugin_dir / "plugin.py"
     if stray.exists() or stray.is_symlink():
         stray.unlink()
-        print(f"  ✓ Removed stray misnamed {stray}")
+        say("ok", f"Removed stray misnamed {stray}")
 
 
 def deploy_plugin(src_root: Path, dest: Path) -> None:
@@ -118,139 +179,244 @@ def deploy_plugin(src_root: Path, dest: Path) -> None:
     plugin_js = src_root / "desktop" / "plugin.js"
     shutil.copy2(plugin_js, dest / "plugin.js")
     remove_stray_plugin_py(dest)
-    # Never copy a misnamed plugin.py even if one exists in src.
     leftover = dest / "plugin.py"
     if leftover.exists():
         leftover.unlink()
 
 
 def sync_voices_from_install() -> None:
-    repo_root = Path(__file__).parent
+    repo_root = REPO_ROOT
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from backend.api import PROVIDERS, storage
     from backend.persona_sync import collect_provider_voices, sync_personas_from_voices
 
     voices = collect_provider_voices(PROVIDERS)
-    # Same stub rule as ensure/sync: name-only Fish clones do not recreate packs.
     result = sync_personas_from_voices(storage, voices)
-    print(
-        f"  ✓ Sync-from-voices: created={len(result['created'])} "
-        f"updated={len(result['updated'])} skipped={len(result['skipped'])}"
+    say(
+        "ok",
+        "Sync-from-voices: "
+        f"created={len(result['created'])} "
+        f"updated={len(result['updated'])} skipped={len(result['skipped'])}",
     )
 
 
-def install(sync_voices: bool = True, systemd: bool = False) -> int:
+def _launch_background(server_path: Path, working_dir: Path) -> subprocess.Popen:
+    kwargs: dict = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
+        "cwd": str(working_dir),
+    }
+    if detect_os() == "windows":
+        flags = int(getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
+        flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        kwargs["creationflags"] = flags
+        kwargs["close_fds"] = True
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen([sys.executable, str(server_path)], **kwargs)
+
+
+def _print_plan(os_kind: str, dest: Path, *, systemd: bool, startup: Path | None) -> None:
+    server = dest / "server.py"
+    say("info", f"OS: {os_kind}")
+    say("info", f"Plugin directory: {dest}")
+    say("info", f"Companion server: {server} on port {COMPANION_PORT}")
+    if os_kind == "windows":
+        say("info", f"Startup launcher: {startup / 'Hermes_PersonaStudio_Companion.vbs' if startup else 'Startup folder'}")
+        say("info", f"Starter script: {hermes_home() / 'scripts' / 'start_personastudio_companion.ps1'}")
+    elif systemd:
+        say("info", f"systemd --user unit: {_systemd_unit_path()}")
+    else:
+        say("info", "Linux persistence: background process only (pass --systemd for a user unit)")
+
+
+def install(
+    sync_voices: bool = True,
+    systemd: bool = False,
+    dry_run: bool = False,
+    platform_name: str | None = None,
+    startup_dir: Path | None = None,
+    prereq_kwargs: dict | None = None,
+) -> int:
+    configure_stdio()
+    os_kind = detect_os(platform_name) if platform_name is not None else detect_os()
     print("=" * 60)
     print("  Installing Hermes PersonaStudio (MVP)")
     print("=" * 60)
 
-    # 1. Check Python dependencies
-    print("[1/6] Checking environment dependencies...")
-    try:
-        import fastapi  # noqa: F401
-        import uvicorn  # noqa: F401
-        import requests  # noqa: F401
-        import yaml  # noqa: F401
-        print("  ✓ FastAPI, Uvicorn, Requests, and PyYAML available.")
-    except ImportError as e:
-        print(f"  ✗ Missing dependency: {e}. Please run: pip install -r requirements.txt")
+    if os_kind == "unsupported":
+        found = platform_name or sys.platform
+        say("fail", f"Unsupported operating system: {found}. PersonaStudio install supports Windows and Linux.")
+        return 2
+
+    if systemd and os_kind != "linux":
+        say("warn", "--systemd is Linux-only. Windows registers a Startup-folder launcher instead.")
+        systemd = False
+
+    home = hermes_home()
+    dest = plugin_dest()
+    print("[1/7] Checking prerequisites (Python, packages, Hermes home, optional providers)...")
+    overrides = dict(prereq_kwargs or {})
+    overrides.setdefault("touch_home", not dry_run)
+    report = check_prereqs(home, **overrides)
+    print_prereqs(report)
+    if report.hard_failed():
+        say("fail", "Prerequisite checks failed. Nothing was deployed.")
         return 1
 
-    # 2. Check local Voicebox & Model Provisioning
-    print("[2/6] Checking local GPU Voicebox models & default voices...")
+    startup = None
+    if os_kind == "windows":
+        try:
+            startup = windows_startup_folder(startup_dir)
+        except OSError as exc:
+            say("fail", str(exc))
+            return 1
+
+    if dry_run:
+        print("[2/7] Dry run — planned actions:")
+        _print_plan(os_kind, dest, systemd=systemd, startup=startup)
+        say("info", "Dry run: no files copied and no process started.")
+        return 0
+
+    print("[2/7] Checking local GPU Voicebox models and default voices...")
     try:
-        from backend.prereqs import is_voicebox_healthy, ensure_local_models, ensure_sample_voices
+        from backend.prereqs import ensure_local_models, ensure_sample_voices, is_voicebox_healthy
+
         if is_voicebox_healthy():
-            print("  ✓ Local GPU Voicebox is running on http://127.0.0.1:17493.")
+            say("ok", "Local GPU Voicebox is running on http://127.0.0.1:17493.")
             triggered = ensure_local_models()
             if triggered:
-                print(f"  ✓ Download queued for missing engine models: {', '.join(triggered)}")
+                say("ok", "Download queued for missing engine models: " + ", ".join(triggered))
             else:
-                print("  ✓ Required TTS models verified.")
+                say("ok", "Required TTS models verified.")
             ensure_sample_voices()
         else:
-            print("  ℹ Voicebox is not active locally — cloud Fish Audio will serve as the primary provider.")
-    except Exception as e:
-        print(f"  ℹ Model provision note: {e}")
+            say("info", "Voicebox is not active locally. Cloud Fish Audio can serve as the primary provider.")
+    except Exception as exc:
+        say("info", f"Model provision note: {exc}")
 
-    # 3. Seed factory presets
-    print("[3/6] Seeding factory presets (~/.hermes/personas/)...")
-    seed_script = Path(__file__).parent / "seed_presets.py"
+    print("[3/7] Seeding factory presets (~/.hermes/personas/)...")
+    seed_script = REPO_ROOT / "seed_presets.py"
     if seed_script.exists():
         subprocess.run([sys.executable, str(seed_script)], check=True)
 
-    # 4. Deploy desktop plugin and companion server
-    print(f"[4/6] Deploying plugin and companion backend to {HERMES_DESKTOP_PLUGINS}...")
-    deploy_plugin(Path(__file__).parent, HERMES_DESKTOP_PLUGINS)
-    print(f"  ✓ Deployed plugin.js (not plugin.py) and backend to {HERMES_DESKTOP_PLUGINS}")
+    print(f"[4/7] Deploying plugin and companion backend to {dest}...")
+    deploy_plugin(REPO_ROOT, dest)
+    say("ok", f"Deployed plugin.js (not plugin.py) and backend to {dest}")
 
-    # 5. Reconcile existing Voicebox/Fish clones into speaking personas
-    print("[5/6] Syncing persona bundles from existing clones...")
+    print("[5/7] Syncing persona bundles from existing clones...")
     if sync_voices:
         try:
             sync_voices_from_install()
-        except Exception as e:
-            print(f"  ℹ Sync-from-voices skipped: {e}")
+        except Exception as exc:
+            say("info", f"Sync-from-voices skipped: {exc}")
     else:
-        print("  ℹ Skipped (--no-sync-voices). Run later: python3 install.py --sync-voices")
+        say("info", "Skipped (--no-sync-voices). Run later: python3 install.py --sync-voices")
 
-    # 6. Check/Start background companion service
-    print("[6/6] Starting PersonaStudio companion service on port 17495...")
-    if systemd:
+    print(f"[6/7] Starting PersonaStudio companion service on port {COMPANION_PORT}...")
+    server_path = dest / "server.py"
+    companion_state = companion_state_from(report)
+    started_by_systemd = False
+    if os_kind == "linux" and systemd:
         try:
-            unit = write_systemd_unit(sys.executable, HERMES_DESKTOP_PLUGINS / "server.py", HERMES_DESKTOP_PLUGINS)
-            print(f"  ✓ Installed and started systemd user unit: {unit}")
-        except Exception as e:
-            print(f"  ℹ systemd helper failed ({e}); falling back to a background process.")
-            systemd = False
-    if not systemd:
+            unit = write_systemd_unit(sys.executable, server_path, dest)
+            say("ok", f"Installed and started systemd user unit: {unit}")
+            started_by_systemd = True
+        except Exception as exc:
+            say("info", f"systemd helper failed ({exc}); falling back to a background process.")
+    if not started_by_systemd:
+        if companion_state == "up":
+            say("ok", f"Companion service is already running on http://127.0.0.1:{COMPANION_PORT}.")
+        elif companion_state == "occupied":
+            say("warn", f"Port {COMPANION_PORT} is occupied by another process. Companion was not started.")
+        else:
+            try:
+                proc = _launch_background(server_path, dest)
+                say("ok", f"Launched background companion (PID: {proc.pid}) on port {COMPANION_PORT}.")
+            except OSError as exc:
+                say("fail", f"Could not start companion: {exc}")
+                return 1
+
+    print("[7/7] Registering reboot persistence...")
+    if os_kind == "windows":
+        if startup is None:
+            say("fail", "Windows Startup folder was not resolved.")
+            return 1
         try:
-            import urllib.request
-            with urllib.request.urlopen("http://127.0.0.1:17495/api/studio/status", timeout=1) as resp:
-                if resp.status == 200:
-                    print("  ✓ Companion service is already running on http://127.0.0.1:17495.")
-        except Exception:
-            proc = subprocess.Popen(
-                [sys.executable, str(COMPANION_SERVER_PY)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            print(f"  ✓ Launched background companion daemon (PID: {proc.pid}) on port 17495.")
+            written = install_windows_startup(home, sys.executable, startup)
+        except OSError as exc:
+            say("fail", f"Could not register Windows startup: {exc}")
+            return 1
+        for path in written:
+            say("ok", f"Wrote {path}")
+    elif started_by_systemd:
+        say("ok", "Reboot persistence is the systemd --user unit.")
+    else:
+        say("info", "No reboot persistence requested. Pass --systemd on Linux to install a user unit.")
 
     print("\n" + "=" * 60)
-    print("  Installation Complete! 🎉")
+    print("  Installation complete.")
     print("  1. Launch or reload Hermes Desktop.")
-    print("  2. Click '🎭 Personas' or '🎙️ Studio' in the titlebar.")
-    print("  3. Picking a complete persona pack applies speaking style + cloned TTS (not voice-only clones).")
+    print("  2. Open Personas or Studio in the titlebar.")
+    print("  3. Picking a complete persona pack applies speaking style + cloned TTS.")
     print("=" * 60)
     return 0
 
 
-def uninstall(purge: bool = False) -> int:
+def uninstall(
+    purge: bool = False,
+    platform_name: str | None = None,
+    startup_dir: Path | None = None,
+    stop_process: bool = True,
+) -> int:
+    configure_stdio()
+    os_kind = detect_os(platform_name) if platform_name is not None else detect_os()
     print("=" * 60)
     print("  Uninstalling Hermes PersonaStudio")
     print("=" * 60)
 
-    print("[1/4] Stopping companion systemd unit (if present)...")
-    stop_companion_systemd()
-    remove_companion_systemd_unit()
+    if os_kind == "unsupported":
+        found = platform_name or sys.platform
+        say("fail", f"Unsupported operating system: {found}. Uninstall supports Windows and Linux.")
+        return 2
+
+    print("[1/4] Stopping companion persistence...")
+    if os_kind == "linux":
+        stop_companion_systemd()
+        remove_companion_systemd_unit()
+    else:
+        try:
+            startup = windows_startup_folder(startup_dir)
+        except OSError as exc:
+            say("fail", str(exc))
+            return 1
+        removed = remove_windows_startup(hermes_home(), startup)
+        if removed:
+            for path in removed:
+                say("ok", f"Removed Windows startup artifact {path}")
+        else:
+            say("info", "No Studio-managed Windows startup files were present.")
 
     print("[2/4] Removing desktop plugin...")
-    if HERMES_DESKTOP_PLUGINS.exists():
-        shutil.rmtree(HERMES_DESKTOP_PLUGINS)
-        print(f"  ✓ Removed desktop plugin from {HERMES_DESKTOP_PLUGINS}")
+    dest = plugin_dest()
+    if dest.exists():
+        shutil.rmtree(dest)
+        say("ok", f"Removed desktop plugin from {dest}")
     else:
-        print("  ℹ Plugin directory already absent.")
+        say("info", "Plugin directory already absent.")
 
-    print("[3/4] Stopping companion process on port 17495...")
-    kill_companion_port()
+    print(f"[3/4] Stopping companion process on port {COMPANION_PORT}...")
+    if stop_process:
+        kill_companion_port()
+    else:
+        say("info", "Skipped stopping the companion process.")
 
     if purge:
         print("[4/4] --purge: reverting Studio-tracked config keys and removing personas/...")
         try:
-            repo_root = Path(__file__).parent
+            repo_root = REPO_ROOT
             if str(repo_root) not in sys.path:
                 sys.path.insert(0, str(repo_root))
             from backend.managed_index import purge_tracked_config
@@ -258,17 +424,17 @@ def uninstall(purge: bool = False) -> int:
             report = purge_tracked_config()
             for profile_id, info in (report.get("profiles") or {}).items():
                 keys = info.get("restored_keys") or []
-                print(f"  ✓ Reverted {len(keys)} tracked key(s) on profile '{profile_id}' ({info.get('config')})")
-            print("  ✓ Never deleted any config.yaml file.")
-        except Exception as e:
-            print(f"  ℹ Config revert note: {e}")
+                say("ok", f"Reverted {len(keys)} tracked key(s) on profile '{profile_id}' ({info.get('config')})")
+            say("ok", "Never deleted any config.yaml file.")
+        except Exception as exc:
+            say("info", f"Config revert note: {exc}")
 
-        personas = HERMES_HOME / "personas"
+        personas = hermes_home() / "personas"
         if personas.exists():
             shutil.rmtree(personas)
-            print(f"  ✓ Removed {personas}")
+            say("ok", f"Removed {personas}")
         else:
-            print("  ℹ personas/ already absent.")
+            say("info", "personas/ already absent.")
     else:
         print("[4/4] Keeping ~/.hermes/personas/ and Hermes config.yaml (pass --purge to revert Studio keys).")
 
@@ -278,7 +444,8 @@ def uninstall(purge: bool = False) -> int:
     return 0
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
+    configure_stdio()
     parser = argparse.ArgumentParser(description="Hermes PersonaStudio Installer")
     parser.add_argument("--uninstall", action="store_true", help="Uninstall PersonaStudio plugin + companion")
     parser.add_argument(
@@ -294,34 +461,40 @@ def main():
     parser.add_argument(
         "--no-sync-voices",
         action="store_true",
-        help="Skip clone→persona reconciliation during install",
+        help="Skip clone-to-persona reconciliation during install",
     )
     parser.add_argument(
         "--systemd",
         action="store_true",
-        help="Install and start a systemd --user unit for the companion daemon",
+        help="Linux only: install and start a systemd --user unit for the companion daemon",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Detect the OS, run prerequisite checks, and print the install plan without copying files or starting processes",
+    )
+    args = parser.parse_args(argv)
 
     if args.purge and not args.uninstall:
         parser.error("--purge requires --uninstall")
+    if args.dry_run and args.uninstall:
+        parser.error("--dry-run cannot be combined with --uninstall")
 
     if args.sync_voices and not args.uninstall:
-        # Standalone reconciliation path (also used after clones already exist).
         print("Syncing speaking personas from existing TTS clones...")
         try:
-            seed_script = Path(__file__).parent / "seed_presets.py"
+            seed_script = REPO_ROOT / "seed_presets.py"
             if seed_script.exists():
                 subprocess.run([sys.executable, str(seed_script)], check=False)
             sync_voices_from_install()
             return 0
-        except Exception as e:
-            print(f"Sync failed: {e}")
+        except Exception as exc:
+            say("fail", f"Sync failed: {exc}")
             return 1
 
     if args.uninstall:
         return uninstall(purge=args.purge)
-    return install(sync_voices=not args.no_sync_voices, systemd=args.systemd)
+    return install(sync_voices=not args.no_sync_voices, systemd=args.systemd, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

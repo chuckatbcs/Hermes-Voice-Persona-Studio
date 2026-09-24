@@ -1766,6 +1766,149 @@ class TestInstallHygiene(IsolatedHermesHomeTest):
         other.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
         self.assertFalse(install_mod._unit_is_ours(other))
 
+    def test_detect_os_branches(self):
+        from install_platform import detect_os
+
+        self.assertEqual(detect_os("win32"), "windows")
+        self.assertEqual(detect_os("linux"), "linux")
+        self.assertEqual(detect_os("darwin"), "unsupported")
+
+    def test_prereqs_hard_fail_without_deploying(self):
+        from install_platform import check_prereqs
+
+        report = check_prereqs(
+            self.home,
+            python_version=(3, 9),
+            missing_modules=["fastapi"],
+            voicebox_up=False,
+            fish_present=False,
+            companion_state="down",
+        )
+        self.assertTrue(report.hard_failed())
+        code = install_mod.install(
+            sync_voices=False,
+            dry_run=True,
+            platform_name="linux",
+            prereq_kwargs={
+                "python_version": (3, 9),
+                "missing_modules": ["fastapi"],
+                "voicebox_up": False,
+                "fish_present": False,
+                "companion_state": "down",
+            },
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse((self.home / "desktop-plugins").exists())
+
+    def test_dry_run_windows_plans_startup_without_copying(self):
+        startup = Path(self.temp_dir) / "Startup"
+        code = install_mod.install(
+            sync_voices=False,
+            systemd=True,
+            dry_run=True,
+            platform_name="windows",
+            startup_dir=startup,
+            prereq_kwargs={
+                "missing_modules": [],
+                "voicebox_up": False,
+                "fish_present": True,
+                "companion_state": "down",
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(startup.exists())
+        self.assertFalse((self.home / "desktop-plugins").exists())
+        self.assertFalse((self.home / "scripts").exists())
+
+    def test_dry_run_rejects_unsupported_os(self):
+        code = install_mod.install(
+            sync_voices=False,
+            dry_run=True,
+            platform_name="darwin",
+            prereq_kwargs={"missing_modules": [], "voicebox_up": False, "fish_present": False, "companion_state": "down"},
+        )
+        self.assertEqual(code, 2)
+
+    def test_windows_startup_scripts_target_installed_plugin(self):
+        from install_platform import install_windows_startup, render_windows_ps1, render_windows_vbs
+
+        python_exe = r"C:\Program Files\Python313\python.exe"
+        ps1 = render_windows_ps1(python_exe)
+        vbs = render_windows_vbs()
+        self.assertIn("desktop-plugins\\hermes-personastudio", ps1)
+        self.assertIn("server.py", ps1)
+        self.assertIn(python_exe, ps1)
+        self.assertNotIn("AI Directory", ps1)
+        self.assertNotIn("Projects", ps1)
+        self.assertIn("%USERPROFILE%", vbs)
+        self.assertIn("start_personastudio_companion.ps1", vbs)
+        ps1.encode("cp1252")
+        vbs.encode("cp1252")
+        for text in (ps1, vbs):
+            self.assertNotIn("\u2713", text)
+            self.assertNotIn("\u2717", text)
+
+        startup = Path(self.temp_dir) / "Startup"
+        written = install_windows_startup(self.home, python_exe, startup)
+        self.assertEqual(len(written), 3)
+        for path in written:
+            self.assertTrue(path.is_file())
+            self.assertIn(install_mod.SYSTEMD_MARKER, path.read_text(encoding="utf-8"))
+
+    def test_windows_uninstall_removes_only_managed_startup_files(self):
+        from install_platform import install_windows_startup
+
+        startup = Path(self.temp_dir) / "Startup"
+        install_windows_startup(self.home, r"C:\Program Files\Python313\python.exe", startup)
+        other = self.home / "scripts" / "unrelated.ps1"
+        other.write_text("Write-Output 'keep'\n", encoding="utf-8")
+        foreign = startup / "KeepMe.vbs"
+        foreign.write_text("' not ours\n", encoding="utf-8")
+        code = install_mod.uninstall(
+            purge=False,
+            platform_name="windows",
+            startup_dir=startup,
+            stop_process=False,
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse((self.home / "scripts" / "start_personastudio_companion.ps1").exists())
+        self.assertFalse((startup / "Hermes_PersonaStudio_Companion.vbs").exists())
+        self.assertTrue(other.exists())
+        self.assertTrue(foreign.exists())
+        self.assertFalse((self.home / "desktop-plugins" / "hermes-personastudio").exists())
+        kept = startup / "Hermes_PersonaStudio_Companion.vbs"
+        kept.write_text("' user launcher without Studio marker\n", encoding="utf-8")
+        again = install_mod.uninstall(
+            purge=False,
+            platform_name="windows",
+            startup_dir=startup,
+            stop_process=False,
+        )
+        self.assertEqual(again, 0)
+        self.assertEqual(kept.read_text(encoding="utf-8"), "' user launcher without Studio marker\n")
+
+    def test_status_lines_are_cp1252_safe(self):
+        from install_platform import Check, PrereqReport, print_prereqs
+        import io
+        from contextlib import redirect_stdout
+
+        report = PrereqReport(
+            checks=[
+                Check("python", "ok", "Python 3.13"),
+                Check("voicebox", "warn", "optional Voicebox is not responding"),
+                Check("packages", "fail", "missing fastapi"),
+            ]
+        )
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            print_prereqs(report)
+        text = buffer.getvalue()
+        text.encode("cp1252")
+        self.assertIn("[ok]", text)
+        self.assertIn("[warn]", text)
+        self.assertIn("[fail]", text)
+        self.assertNotIn("\u2713", text)
+
 
 class TestSeedPresets(IsolatedHermesHomeTest):
     def test_seed_writes_under_hermes_home(self):

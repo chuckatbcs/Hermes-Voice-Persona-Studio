@@ -62,25 +62,57 @@ graph TD
 * Python 3.10+ with `pip`.
 * Optional: Local NVIDIA GPU with CUDA for local neural Voicebox generation.
 
-### One-Command Installer
+### One installer, Linux or Windows
+
+`install.py` detects the OS. It supports **Windows** and **Linux**, and exits with a clear error on anything else. Prerequisite checks run before any deploy:
+
+* Python 3.10+ and `fastapi`, `uvicorn`, `requests`, `pyyaml` (hard fail).
+* Write access to the Hermes home (`%USERPROFILE%\.hermes` on Windows, `~/.hermes` on Linux) (hard fail).
+* Optional Voicebox on `127.0.0.1:17493` and an optional Fish API key (warnings only).
+* Companion port `17495` (free, already ours, or occupied by something else).
+
+Preview the plan without copying files or starting processes:
+
 ```bash
-# Clone the repository
+python3 install.py --dry-run
+```
+
+#### Linux
+
+```bash
 git clone https://github.com/chuckatbcs/Hermes-Voice-Persona-Studio.git
 cd Hermes-Voice-Persona-Studio
-
-# Run the automated installer
 python3 install.py
 ```
 
+`python3 install.py --systemd` also installs a `systemd --user` unit (`hermes-personastudio.service`) so the companion comes back after login. Without `--systemd`, the installer only starts a background process for this session.
+
+#### Windows
+
+From the repo checkout (PowerShell or Command Prompt):
+
+```bat
+py -3 install.py
+```
+
+This deploys the plugin to `%USERPROFILE%\.hermes\desktop-plugins\hermes-personastudio`, starts `server.py` from that installed directory, and registers a per-user Startup launcher:
+
+* `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Hermes_PersonaStudio_Companion.vbs`
+* `%USERPROFILE%\.hermes\scripts\start_personastudio_companion.ps1`
+
+The Startup script resolves the installed plugin under `%USERPROFILE%`. It does not hardcode a source-checkout path. `--systemd` is ignored on Windows with a warning.
+
+Console status lines use ASCII tags (`[ok]`, `[warn]`, `[fail]`, `[info]`). The installer also asks the console for UTF-8 when the runtime allows it, so cp1252 windows do not crash on status output.
+
 The installer will:
-1. Validate Python dependencies (`fastapi`, `uvicorn`, `requests`, `pyyaml`).
+1. Run the prerequisite checks above.
 2. Verify local Voicebox models (or default to Fish Audio cloud if GPU is absent).
 3. Seed factory starter personas that already have a cloned `voice_id` (Cartman). Incomplete Fish-`default` presets (Jarvis / Storyteller) are **not** auto-created so deleted stub packs stay gone. Existing `prompt.md` files are never clobbered.
 4. Reconcile existing Voicebox/Fish clones into persona bundles (`--no-sync-voices` to skip).
 5. Deploy `plugin.js` to `~/.hermes/desktop-plugins/hermes-personastudio/` (never a misnamed `plugin.py`).
-6. Launch the background companion service on `http://127.0.0.1:17495`.
+6. Launch the companion on `http://127.0.0.1:17495` and register OS persistence (Windows Startup folder, or Linux `--systemd`).
 
-Optional: `python3 install.py --systemd` installs a user unit for the companion. `python3 install.py --sync-voices` only runs the clone→persona reconciliation.
+`python3 install.py --sync-voices` only runs the clone→persona reconciliation.
 
 ---
 
@@ -149,17 +181,23 @@ The companion service runs at `http://127.0.0.1:17495`.
 
 ## 🧹 Uninstallation
 
-Remove the desktop plugin and stop the companion (systemd unit + `:17495`). Hermes core and `~/.hermes/hermes-agent` stay untouched. Persona bundles and config keys are **kept**:
+Remove the desktop plugin and stop the companion. Hermes core and `~/.hermes/hermes-agent` stay untouched. Persona bundles and config keys are **kept**.
+
+Linux (`python3`) and Windows (`py -3`):
 
 ```bash
 python3 install.py --uninstall
 ```
+
+On Linux this stops and removes the Studio-managed `systemd --user` unit, then frees port `17495`. On Windows it removes the Startup VBS and the Studio-managed files under `%USERPROFILE%\.hermes\scripts\` (only when they contain the Studio marker) and frees port `17495`.
 
 Also delete `~/.hermes/personas/` and revert Studio-tracked personality/TTS keys (never deletes `config.yaml`):
 
 ```bash
 python3 install.py --uninstall --purge
 ```
+
+`--purge` is the same on both operating systems: it does not remove Hermes `config.yaml`, and it does not delete unrelated files in `.hermes\scripts`.
 
 Agent-facing review notes for this release: [`docs/AGENT_REVIEW.md`](docs/AGENT_REVIEW.md).
 
