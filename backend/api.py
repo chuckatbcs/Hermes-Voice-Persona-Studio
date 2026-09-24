@@ -114,6 +114,7 @@ def list_clone_models(provider: str = "voicebox") -> List[Dict[str, Any]]:
             {"id": "chatterbox_turbo", "name": "Chatterbox Turbo (High Emotion, Tag-Aware, Local GPU)", "recommended": False},
             {"id": "chatterbox", "name": "Chatterbox Standard (Deep Neural Voice, Local GPU)", "recommended": False},
             {"id": "kokoro", "name": "Kokoro (Ultra-Fast Preset Only, Low VRAM)", "recommended": False},
+            {"id": "luxtts", "name": "LuxTTS (Fast, CPU-friendly)", "recommended": False},
         ]
     elif provider == "fish_audio":
         return [
