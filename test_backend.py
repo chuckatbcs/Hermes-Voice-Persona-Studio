@@ -124,6 +124,18 @@ class TestProvidersOffline(unittest.TestCase):
         provider = VoiceboxProvider()
         self.assertEqual(provider.name, "voicebox")
 
+    def test_voicebox_model_catalog_includes_luxtts(self):
+        from backend.api import list_clone_models
+
+        models = list_clone_models("voicebox")
+        by_id = {model["id"]: model for model in models}
+        for existing in ("qwen_fast", "qwen", "chatterbox_turbo", "chatterbox", "kokoro"):
+            self.assertIn(existing, by_id)
+        lux = by_id["luxtts"]
+        self.assertEqual(lux["name"], "LuxTTS (Fast, CPU-friendly)")
+        self.assertFalse(lux["recommended"])
+        self.assertTrue(by_id["qwen_fast"]["recommended"])
+
 
 class TestPersonaSync(IsolatedHermesHomeTest):
     def test_fallback_prompt_uses_description(self):
