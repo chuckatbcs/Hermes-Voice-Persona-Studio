@@ -772,7 +772,7 @@ async function resetSessionOverlay(profile, options) {
     });
     if (!res.ok) return false;
     const refresh = await refreshLiveSessionPersonality('none');
-    if (!refresh.ok && options && options.notifyOnRefreshFailure) {
+    if (!refresh.ok && options && options.notifyOnRefreshFailure && refresh.skipped !== 'no-session') {
       notifyHost(
         'warning',
         'Live session not refreshed',
@@ -875,7 +875,7 @@ async function applySpeakingBundleToProfile({
       const refresh = await refreshLiveSessionPersonality(personaKey);
       liveRefreshed = !!refresh.ok;
       refreshNote = refresh.skipped || refresh.error || '';
-      if (!refresh.ok) {
+      if (!refresh.ok && refresh.skipped !== 'no-session') {
         notifyHost(
           'warning',
           'Live session not refreshed',
@@ -892,11 +892,13 @@ async function applySpeakingBundleToProfile({
   }
 
   const ttsLabel = providerLabel(boundProvider);
-  if (applied && liveRefreshed) {
+  if (applied && (liveRefreshed || refreshNote === 'no-session')) {
     notifyHost(
       'success',
       `${bundle.avatar || '🎭'} ${bundle.name} · ${ttsLabel}`,
-      `Live session refreshed — next reply in this chat uses ${bundle.name} + ${ttsLabel}. New Chat returns to stock.`
+      refreshNote === 'no-session'
+        ? `Applied ${bundle.name} + ${ttsLabel} to "${profile}". Next chat message will use this persona.`
+        : `Live session refreshed — next reply in this chat uses ${bundle.name} + ${ttsLabel}. New Chat returns to stock.`
     );
   } else if (applied) {
     notifyHost(
@@ -1056,7 +1058,7 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
       overlay.active = false;
       setActiveId('default');
       window.__ACTIVE_PERSONA_STUDIO__ = null;
-      await resetSessionOverlay(profile, { notifyOnRefreshFailure: true });
+      await resetSessionOverlay(profile, { notifyOnRefreshFailure: false });
     }
   }, []);
 
