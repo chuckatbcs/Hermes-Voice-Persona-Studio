@@ -972,11 +972,391 @@ function playAudioBase64(b64, mime = 'audio/wav') {
   }
 }
 
+// ── Group Chat Voice & Speech Sanitizer ──────────────────────────────────
+const SPEECH_EMOJI_RE = /(?:[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]|[\u{FE0F}\u{200D}]|[\u{E0020}-\u{E007F}])+/gu;
+const SPEECH_FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
+const SPEECH_INLINE_CODE_RE = /`([^`]+)`/g;
+const SPEECH_MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g;
+const SPEECH_PARAGRAPH_BREAK_RE = /[ \t]*\n{2,}[ \t]*/g;
+const SPEECH_PUNCTUATED_PARAGRAPH_BREAK_RE = /([.!?])([*_~`>"'’”)}\]]*)[ \t]*\n{2,}[ \t]*/g;
+const SPEECH_SOFT_BREAK_RE = /[ \t]*\n[ \t]*/g;
+const SPEECH_MEDIA_PATH_RE = /[ \t]*MEDIA:\S+?(?=[.,;:!?)\]]*(?:\s|$))/g;
+const SPEECH_LINE_FINAL_COLON_RE = /:\s*$/gm;
+const SPEECH_THINKING_PREFIX_RE = /^\s*(?:\([^)\n]{1,48}\)\s*)?(?:processing|thinking|reasoning|analyzing|pondering|contemplating|musing|cogitating|ruminating|deliberating|mulling|reflecting|computing|synthesizing|formulating|brainstorming)\.\.\.\s*/i;
+const SPEECH_URL_RE = /\bhttps?:\/\/\S+/gi;
+
+function sanitizeTextForSpeech(text) {
+  if (!text) return '';
+  let str = String(text);
+  str = str.replace(SPEECH_FENCED_CODE_RE, '');
+  // Remove markdown tables (lines starting with | or separator rows)
+  str = str.split('\n').filter(line => !line.trim().startsWith('|') && !line.includes('|-')).join('\n');
+  str = str.replace(SPEECH_THINKING_PREFIX_RE, ' ');
+  str = str.replace(SPEECH_LINE_FINAL_COLON_RE, '.');
+  str = str.replace(/\r\n?/g, '\n')
+           .replace(SPEECH_PUNCTUATED_PARAGRAPH_BREAK_RE, '$1$2 ')
+           .replace(SPEECH_PARAGRAPH_BREAK_RE, '. ')
+           .replace(SPEECH_SOFT_BREAK_RE, ' ');
+  str = str.replace(SPEECH_MARKDOWN_LINK_RE, '$1');
+  str = str.replace(SPEECH_INLINE_CODE_RE, '$1');
+  str = str.replace(SPEECH_URL_RE, '');
+  str = str.replace(SPEECH_MEDIA_PATH_RE, '');
+  str = str.replace(SPEECH_EMOJI_RE, ' ');
+  str = str.replace(/^#{1,6}\s+/gm, '')
+           .replace(/[*_~>#]/g, '')
+           .replace(/^\s*[-+*]\s+/gm, '')
+           .replace(/:\s*$/, '.')
+           .replace(/\s+/g, ' ')
+           .trim();
+  return str;
+}
+
+function resolveProfileForSpeaker(speakerName, profiles) {
+  if (!speakerName || !profiles || !profiles.length) return null;
+  const raw = String(speakerName).trim().replace(/^@/, '');
+  const clean = raw.toLowerCase().replace(/[-_]/g, ' ');
+  const cleanSlug = slugifyName(raw);
+
+  // 1. Direct exact id or title match
+  for (const p of profiles) {
+    if (p.id && (p.id.toLowerCase() === clean || slugifyName(p.id) === cleanSlug)) return p;
+    if (p.title && (p.title.toLowerCase() === clean || slugifyName(p.title) === cleanSlug)) return p;
+  }
+
+  // 2. Token / substring containment
+  for (const p of profiles) {
+    const pTitle = (p.title || '').toLowerCase();
+    const pId = (p.id || '').toLowerCase();
+    if (pId && (clean.includes(pId) || pId.includes(clean))) return p;
+    if (pTitle && (clean.includes(pTitle) || pTitle.includes(clean))) return p;
+  }
+
+  // 3. Name match score
+  let bestScore = 0;
+  let bestProfile = null;
+  for (const p of profiles) {
+    const sId = nameMatchScore(raw, p.id || '');
+    const sTitle = nameMatchScore(raw, p.title || '');
+    const score = Math.max(sId, sTitle);
+    if (score > bestScore) {
+      bestScore = score;
+      bestProfile = p;
+    }
+  }
+  if (bestScore > 50) return bestProfile;
+
+  // 4. Fallback to default or first
+  const def = profiles.find(p => p.id === 'default');
+  return def || profiles[0];
+}
+
+const SVG_SPEAKER_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
+const SVG_STOP_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>';
+const SVG_LOADING_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><circle cx="12" cy="12" r="9" stroke-dasharray="32" stroke-dashoffset="12"></circle></svg>';
+
+class GroupSpeechQueue {
+  constructor() {
+    this.queue = [];
+    this.isPlaying = false;
+    this.currentTask = null;
+    this.activeAudio = null;
+  }
+
+  isSpeakingTask(taskRef) {
+    return this.isPlaying && this.currentTask && this.currentTask.id === taskRef;
+  }
+
+  enqueue(task) {
+    this.queue.push(task);
+    this.process();
+  }
+
+  stopAll() {
+    this.queue = [];
+    if (this.activeAudio) {
+      try {
+        this.activeAudio.pause();
+        this.activeAudio.src = '';
+      } catch (_) {}
+      this.activeAudio = null;
+    }
+    if (this.currentTask && this.currentTask.onEnd) {
+      try { this.currentTask.onEnd(); } catch (_) {}
+    }
+    this.currentTask = null;
+    this.isPlaying = false;
+  }
+
+  async process() {
+    if (this.isPlaying) return;
+    if (this.queue.length === 0) return;
+
+    this.isPlaying = true;
+    const task = this.queue.shift();
+    this.currentTask = task;
+
+    if (task.onStart) {
+      try { task.onStart(); } catch (_) {}
+    }
+
+    try {
+      const resp = await fetch(`${API_BASE}/speak-profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_id: task.profileId, text: task.text })
+      });
+      if (!resp.ok) {
+        throw new Error(`Synthesis HTTP error: ${resp.status}`);
+      }
+      const data = await resp.json();
+      if (!data.ok || !data.audio_base64) {
+        throw new Error(data.error || 'Empty audio returned');
+      }
+
+      await new Promise((resolve) => {
+        try {
+          const byteChars = atob(data.audio_base64);
+          const byteNumbers = new Uint8Array(byteChars.length);
+          for (let i = 0; i < byteChars.length; i++) {
+            byteNumbers[i] = byteChars.charCodeAt(i);
+          }
+          const blob = new Blob([byteNumbers], { type: data.format || 'audio/wav' });
+          const blobUrl = URL.createObjectURL(blob);
+          const audio = new Audio(blobUrl);
+          this.activeAudio = audio;
+
+          const finish = () => {
+            URL.revokeObjectURL(blobUrl);
+            if (this.activeAudio === audio) this.activeAudio = null;
+            resolve();
+          };
+
+          audio.onended = finish;
+          audio.onerror = (e) => {
+            console.error('[PersonaStudio] Group audio playback error:', e);
+            finish();
+          };
+
+          const p = audio.play();
+          if (p !== undefined) {
+            p.catch((err) => {
+              console.warn('[PersonaStudio] Audio play interrupted/blocked:', err);
+              finish();
+            });
+          }
+        } catch (err) {
+          console.error('[PersonaStudio] Failed to play audio:', err);
+          resolve();
+        }
+      });
+    } catch (err) {
+      console.warn('[PersonaStudio] Group speech error:', err);
+      if (task.onError) {
+        try { task.onError(err); } catch (_) {}
+      }
+    } finally {
+      if (task.onEnd) {
+        try { task.onEnd(); } catch (_) {}
+      }
+      this.currentTask = null;
+      this.isPlaying = false;
+      this.process();
+    }
+  }
+}
+
+const groupSpeechQueue = new GroupSpeechQueue();
+
+function useGroupChatVoiceEnhancer({ autoReadGroup, botProfiles }) {
+  const autoReadRef = useRef(autoReadGroup);
+  autoReadRef.current = autoReadGroup;
+
+  const botProfilesRef = useRef(botProfiles);
+  botProfilesRef.current = botProfiles;
+
+  const initializedRef = useRef(false);
+
+  useEffect(() => {
+    // 1. Initial scan: mark existing messages so historical chat is not spoken aloud on load
+    const existing = document.querySelectorAll('div[data-slot="group-chat-message-content"]');
+    existing.forEach((el) => {
+      el.dataset.personastudioSeen = '1';
+    });
+    // Short delay before enabling auto-read to avoid catching messages rendering during initial mount
+    const timer = setTimeout(() => {
+      initializedRef.current = true;
+    }, 1200);
+
+    const checkAndEnhanceMessage = (contentEl) => {
+      if (!contentEl || !contentEl.isConnected) return;
+      const entryRow = contentEl.closest('.group') || contentEl.parentElement;
+      if (!entryRow) return;
+
+      // Determine speaker
+      const replyBtn = entryRow.querySelector('button[aria-label^="Reply to "]');
+      let speaker = '';
+      if (replyBtn) {
+        const aria = replyBtn.getAttribute('aria-label') || '';
+        speaker = aria.replace(/^Reply to\s+/i, '').trim();
+      } else {
+        const nameBtn = entryRow.querySelector('button.text-left');
+        if (nameBtn) speaker = (nameBtn.textContent || '').trim();
+      }
+
+      // If user message, skip
+      if (!speaker || speaker.toLowerCase() === 'you') return;
+
+      // Inject Read Aloud button into action bar if not already present
+      const actionBar = entryRow.querySelector('div.ml-auto');
+      if (actionBar && !actionBar.querySelector('.personastudio-group-speak')) {
+        const btn = document.createElement('button');
+        btn.className = 'personastudio-group-speak inline-flex items-center justify-center rounded text-xs transition-colors hover:bg-muted text-muted-foreground hover:text-foreground h-6 w-6 p-0 shrink-0';
+        btn.setAttribute('type', 'button');
+        btn.setAttribute('title', `Read aloud with ${speaker}`);
+        btn.setAttribute('aria-label', `Read aloud with ${speaker}`);
+        btn.innerHTML = SVG_SPEAKER_ICON;
+
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+
+          if (groupSpeechQueue.isSpeakingTask(contentEl)) {
+            groupSpeechQueue.stopAll();
+            return;
+          }
+
+          const rawText = contentEl.innerText || contentEl.textContent || '';
+          const text = sanitizeTextForSpeech(rawText);
+          if (!text) return;
+
+          const profile = resolveProfileForSpeaker(speaker, botProfilesRef.current);
+          const profileId = profile ? profile.id : 'default';
+
+          btn.innerHTML = SVG_LOADING_ICON;
+          btn.classList.add('text-primary');
+
+          groupSpeechQueue.enqueue({
+            id: contentEl,
+            speaker,
+            profileId,
+            text,
+            buttonEl: btn,
+            onStart: () => {
+              btn.innerHTML = SVG_STOP_ICON;
+              btn.classList.add('text-primary');
+              btn.setAttribute('title', 'Stop reading');
+            },
+            onEnd: () => {
+              btn.innerHTML = SVG_SPEAKER_ICON;
+              btn.classList.remove('text-primary');
+              btn.setAttribute('title', `Read aloud with ${speaker}`);
+            },
+            onError: () => {
+              btn.innerHTML = SVG_SPEAKER_ICON;
+              btn.classList.remove('text-primary');
+              btn.setAttribute('title', `Read aloud with ${speaker}`);
+            }
+          });
+        };
+
+        actionBar.appendChild(btn);
+      }
+
+      // Auto-read logic for new incoming messages
+      if (initializedRef.current && autoReadRef.current && !contentEl.dataset.personastudioSpoken) {
+        if (!contentEl.dataset.personastudioSeen) {
+          contentEl.dataset.personastudioSeen = '1';
+          contentEl.dataset.personastudioSpoken = '1';
+
+          // Delay slightly (350ms) to ensure full message turn has landed
+          setTimeout(() => {
+            const rawText = contentEl.innerText || contentEl.textContent || '';
+            const text = sanitizeTextForSpeech(rawText);
+            if (!text) return;
+
+            const profile = resolveProfileForSpeaker(speaker, botProfilesRef.current);
+            const profileId = profile ? profile.id : 'default';
+            const btn = entryRow.querySelector('.personastudio-group-speak');
+
+            groupSpeechQueue.enqueue({
+              id: contentEl,
+              speaker,
+              profileId,
+              text,
+              buttonEl: btn,
+              onStart: () => {
+                if (btn) {
+                  btn.innerHTML = SVG_STOP_ICON;
+                  btn.classList.add('text-primary');
+                  btn.setAttribute('title', 'Stop reading');
+                }
+              },
+              onEnd: () => {
+                if (btn) {
+                  btn.innerHTML = SVG_SPEAKER_ICON;
+                  btn.classList.remove('text-primary');
+                  btn.setAttribute('title', `Read aloud with ${speaker}`);
+                }
+              },
+              onError: () => {
+                if (btn) {
+                  btn.innerHTML = SVG_SPEAKER_ICON;
+                  btn.classList.remove('text-primary');
+                  btn.setAttribute('title', `Read aloud with ${speaker}`);
+                }
+              }
+            });
+          }, 350);
+        }
+      }
+    };
+
+    const scanAll = () => {
+      const messages = document.querySelectorAll('div[data-slot="group-chat-message-content"]');
+      messages.forEach(checkAndEnhanceMessage);
+    };
+    scanAll();
+
+    const observer = new MutationObserver(() => {
+      scanAll();
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, []);
+}
+
 // ── Root Plugin Host Wrapper ──────────────────────────────────────────────
 function PersonaStudioRoot() {
   const [studioOpen, setStudioOpen] = useState(false);
   const [personas, setPersonas] = useState([]);
   const [voices, setVoices] = useState([]);
+  const [botProfiles, setBotProfiles] = useState([]);
+
+  const [autoReadGroup, setAutoReadGroup] = useState(() => {
+    try {
+      return localStorage.getItem('hermes_personastudio_group_auto_read') === 'true';
+    } catch (_) {
+      return false;
+    }
+  });
+
+  const toggleAutoReadGroup = useCallback(() => {
+    setAutoReadGroup(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('hermes_personastudio_group_auto_read', String(next));
+      } catch (_) {}
+      return next;
+    });
+  }, []);
 
   const refreshPersonas = useCallback(async () => {
     try {
@@ -1004,37 +1384,70 @@ function PersonaStudioRoot() {
     } catch (_) {}
   }, []);
 
+  const refreshBotProfiles = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/profiles`);
+      if (res.ok) {
+        const list = await res.json();
+        setBotProfiles(list || []);
+      }
+    } catch (_) {}
+  }, []);
+
   useEffect(() => {
     refreshPersonas();
     refreshVoices();
+    refreshBotProfiles();
     const interval = setInterval(() => {
       refreshPersonas();
       refreshVoices();
+      refreshBotProfiles();
     }, 60000);
     const onFocus = () => {
       refreshPersonas();
       refreshVoices();
+      refreshBotProfiles();
     };
     window.addEventListener('focus', onFocus);
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', onFocus);
     };
-  }, [refreshPersonas, refreshVoices]);
+  }, [refreshPersonas, refreshVoices, refreshBotProfiles]);
+
+  useGroupChatVoiceEnhancer({ autoReadGroup, botProfiles });
 
   const overlayRef = useRef(emptyOverlayState({ profileId: focusedProfile() }));
   const titlebarApiRef = useRef({ setActiveId: () => {} });
 
   return jsxs(React.Fragment, {
     children: [
-      jsx(TitlebarPersonaPicker, { openStudio: () => setStudioOpen(true), personas, voices, refreshPersonas, refreshVoices, overlayRef, titlebarApiRef }),
-      jsx(StudioModal, { open: studioOpen, onOpenChange: setStudioOpen, refreshPersonas, overlayRef, titlebarApiRef })
+      jsx(TitlebarPersonaPicker, {
+        openStudio: () => setStudioOpen(true),
+        personas,
+        voices,
+        refreshPersonas,
+        refreshVoices,
+        overlayRef,
+        titlebarApiRef,
+        autoReadGroup,
+        toggleAutoReadGroup
+      }),
+      jsx(StudioModal, {
+        open: studioOpen,
+        onOpenChange: setStudioOpen,
+        refreshPersonas,
+        overlayRef,
+        titlebarApiRef,
+        autoReadGroup,
+        toggleAutoReadGroup
+      })
     ]
   });
 }
 
 // ── Titlebar Persona Picker Component ─────────────────────────────────────
-function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, refreshVoices, overlayRef, titlebarApiRef }) {
+function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, refreshVoices, overlayRef, titlebarApiRef, autoReadGroup, toggleAutoReadGroup }) {
   const [activeId, setActiveId] = useState('default');
   const [profileId, setProfileId] = useState(() => focusedProfile());
   const personasRef = useRef(personas);
@@ -1235,13 +1648,30 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
         onClick: openStudio,
         title: 'Open Persona & Voice Studio',
         children: '🎙️ Studio'
+      }),
+      jsx(Button, {
+        size: 'sm',
+        variant: autoReadGroup ? 'default' : 'ghost',
+        className: `h-7 px-2 text-xs flex items-center gap-1 transition-colors ${
+          autoReadGroup
+            ? 'bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 font-semibold'
+            : 'text-muted-foreground hover:text-foreground'
+        }`,
+        onClick: toggleAutoReadGroup,
+        title: autoReadGroup
+          ? 'Group Chat Voice: Auto-read ON (Click to disable)'
+          : 'Group Chat Voice: Auto-read OFF (Click to enable)',
+        children: [
+          jsx('span', { className: 'text-[11px]', children: autoReadGroup ? '🔊' : '🔈' }),
+          jsx('span', { className: 'text-[11px]', children: autoReadGroup ? 'Group: ON' : 'Group Voice' })
+        ]
       })
     ]
   });
 }
 
 // ── Voice & Persona Studio Dialog Modal ───────────────────────────────────
-function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebarApiRef }) {
+function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebarApiRef, autoReadGroup, toggleAutoReadGroup }) {
   const [activeTab, setActiveTab] = useState('apply'); // 'apply' | 'builder'
   const [provider, setProvider] = useState('fish_audio');
   const [voices, setVoices] = useState([]);
@@ -1927,10 +2357,27 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
               }),
 
               jsxs('div', {
-                className: 'p-3 bg-muted/10 border border-border/50 rounded space-y-2',
+                className: 'p-3 bg-muted/10 border border-border/50 rounded space-y-3',
                 children: [
-                  jsx('div', { className: 'text-xs font-bold text-muted-foreground', children: 'Group-chat voice bind' }),
-                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Assigns TTS keys for @mentions in group chats. This is not the session Apply button above.' }),
+                  jsxs('div', {
+                    className: 'flex items-center justify-between',
+                    children: [
+                      jsxs('div', {
+                        children: [
+                          jsx('div', { className: 'text-xs font-bold text-foreground', children: '👥 Group-chat Voice & Auto-read' }),
+                          jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Multi-bot group chat voice support. Each bot speaks using its configured voice identity.' })
+                        ]
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: autoReadGroup ? 'default' : 'outline',
+                        onClick: toggleAutoReadGroup,
+                        className: `text-xs h-7 px-2.5 font-medium ${autoReadGroup ? 'bg-primary text-primary-foreground' : ''}`,
+                        title: autoReadGroup ? 'Auto-read group replies is enabled (Click to disable)' : 'Auto-read group replies is disabled (Click to enable)',
+                        children: autoReadGroup ? '🔊 Auto-read: ON' : '🔈 Auto-read: OFF'
+                      })
+                    ]
+                  }),
                   jsxs('div', {
                     className: 'flex items-center justify-between',
                     children: [

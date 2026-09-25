@@ -58,6 +58,13 @@ class AuditionRequest(BaseModel):
     engine: Optional[str] = None
 
 
+class SpeakProfileRequest(BaseModel):
+    text: str
+    profile_id: str
+    speed: float = 1.0
+    temperature: float = 0.7
+
+
 class CreatePersonaRequest(BaseModel):
     id: Optional[str] = None
     name: str
@@ -221,6 +228,52 @@ def audition_voice(req: AuditionRequest) -> Dict[str, Any]:
         )
         b64 = base64.b64encode(audio_bytes).decode("ascii")
         return {"ok": True, "audio_base64": b64, "format": "audio/wav"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/speak-profile")
+def speak_for_profile(req: SpeakProfileRequest) -> Dict[str, Any]:
+    """Synthesize speech using a bot profile's assigned voice identity."""
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty text to speak")
+
+    pid = str(req.profile_id or "default").strip()
+    path = config_path_for_profile(pid)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Profile '{pid}' config not found")
+
+    cfg = load_yaml(path)
+    tts_res = bot_profiles.resolve_profile_tts(cfg)
+    prov_name = tts_res.get("provider") or "voicebox"
+    voice_id = tts_res.get("voice_id") or tts_res.get("voice") or "default"
+
+    # Map provider key
+    prov_key = "fish_audio" if prov_name in ("fish", "fish_audio") else "voicebox"
+    prov = PROVIDERS.get(prov_key)
+    if not prov:
+        raise HTTPException(status_code=400, detail=f"Provider '{prov_name}' not supported")
+    if not prov.is_available():
+        raise HTTPException(status_code=503, detail=f"Provider '{prov_name}' is not available or unconfigured")
+
+    try:
+        audio_bytes = prov.synthesize(
+            text=text,
+            voice_id=voice_id,
+            speed=req.speed,
+            temperature=req.temperature,
+        )
+        b64 = base64.b64encode(audio_bytes).decode("ascii")
+        return {
+            "ok": True,
+            "profile_id": pid,
+            "provider": prov_key,
+            "voice_id": voice_id,
+            "voice_name": tts_res.get("voice_name") or voice_id,
+            "audio_base64": b64,
+            "format": "audio/wav",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

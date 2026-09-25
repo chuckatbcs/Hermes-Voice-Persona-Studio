@@ -790,6 +790,21 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         self._write_config()
         profiles = bot_profiles.list_bot_profiles()
         self.assertTrue(any(p["id"] == "default" for p in profiles))
+        default_prof = next(p for p in profiles if p["id"] == "default")
+        self.assertEqual(default_prof["provider"], "fish")
+        self.assertEqual(default_prof["voice"], "old_voice")
+        self.assertEqual(default_prof["voice_id"], "old-id")
+
+    def test_resolve_profile_tts_handles_edge_and_voicebox(self):
+        cfg_edge = {"tts": {"provider": "edge", "edge": {"voice": "en-US-AriaNeural"}}}
+        res_edge = bot_profiles.resolve_profile_tts(cfg_edge)
+        self.assertEqual(res_edge["provider"], "edge")
+        self.assertEqual(res_edge["voice_id"], "en-US-AriaNeural")
+
+        cfg_vb = {"tts": {"provider": "voicebox", "providers": {"voicebox": {"voice": "vb-uuid-1234"}}}}
+        res_vb = bot_profiles.resolve_profile_tts(cfg_vb)
+        self.assertEqual(res_vb["provider"], "voicebox")
+        self.assertEqual(res_vb["voice_id"], "vb-uuid-1234")
 
 
 class TestSessionOverlay(IsolatedHermesHomeTest):

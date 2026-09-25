@@ -40,6 +40,66 @@ def is_usable_voicebox_voice_id(value: Any) -> bool:
     return bool(_VOICEBOX_UUID.match(str(value).strip()))
 
 
+def resolve_profile_tts(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract configured provider, voice label/id, and resolved voice_id/voice_name from profile config."""
+    tts = (cfg.get("tts") or {}) if isinstance(cfg, dict) else {}
+    prov_raw = str(tts.get("provider") or "").strip().lower()
+    if not prov_raw:
+        return {"provider": None, "voice": None, "voice_id": None, "voice_name": None}
+
+    if prov_raw in ("edge", "edgetts"):
+        edge_voice = str((tts.get("edge") or {}).get("voice") or "en-US-AriaNeural").strip()
+        return {
+            "provider": "edge",
+            "voice": edge_voice,
+            "voice_id": edge_voice,
+            "voice_name": edge_voice,
+        }
+
+    prov_key = "fish" if prov_raw in ("fish", "fish_audio") else "voicebox"
+    prov_cfg = (tts.get("providers", {}) or {}).get(prov_key, {}) or {}
+    voice_label = str(prov_cfg.get("voice") or "").strip()
+
+    voice_id = None
+    voice_name = voice_label or None
+
+    if prov_key == "voicebox":
+        voice_id = voice_label
+    elif prov_key == "fish":
+        # Check command flag --fish-voice first
+        cmd = str(prov_cfg.get("command") or "")
+        match_voice = re.search(r"--fish-voice\s+([^\s]+)", cmd)
+        if match_voice:
+            voice_id = match_voice.group(1).strip()
+        # Fall back to clones dict
+        if not voice_id:
+            clones = prov_cfg.get("clones") or {}
+            if isinstance(clones, dict):
+                voice_id = clones.get(voice_label)
+        # Fall back to ~/.hermes/fish_voices.json
+        if not voice_id:
+            cache_p = fish_voices_cache_path()
+            if cache_p.exists():
+                try:
+                    data = json.loads(cache_p.read_text(encoding="utf-8")) or {}
+                    if isinstance(data, dict):
+                        val = data.get(voice_label)
+                        if isinstance(val, dict):
+                            voice_id = val.get("voice_id") or val.get("id")
+                            voice_name = val.get("title") or val.get("name") or voice_name
+                        elif isinstance(val, str):
+                            voice_id = val
+                except Exception:
+                    pass
+
+    return {
+        "provider": prov_key,
+        "voice": voice_label or None,
+        "voice_id": voice_id or voice_label or None,
+        "voice_name": voice_name or voice_label or None,
+    }
+
+
 def list_bot_profiles() -> List[Dict[str, Any]]:
     """Return all available Hermes bot profiles with their display titles and current voices."""
     profiles: List[Dict[str, Any]] = []
@@ -49,18 +109,14 @@ def list_bot_profiles() -> List[Dict[str, Any]]:
     if def_cfg.exists():
         try:
             c = load_yaml(def_cfg)
-            tts = c.get("tts", {}) or {}
-            tts_prov = tts.get("provider")
-            if (tts_prov or "").strip().lower() == "edge":
-                current_voice = (tts.get("edge") or {}).get("voice")
-            else:
-                prov_cfg = (tts.get("providers", {}) or {}).get(tts_prov or "", {}) or {}
-                current_voice = prov_cfg.get("voice")
+            resolved = resolve_profile_tts(c)
             profiles.append({
                 "id": "default",
                 "title": "Default Assistant",
-                "provider": tts_prov,
-                "voice": current_voice,
+                "provider": resolved["provider"],
+                "voice": resolved["voice"],
+                "voice_id": resolved["voice_id"],
+                "voice_name": resolved["voice_name"],
             })
         except Exception as e:
             print(f"[Profiles] Error reading default config: {e}")
@@ -81,27 +137,22 @@ def list_bot_profiles() -> List[Dict[str, Any]]:
                 except Exception:
                     pass
 
-            tts_prov = None
-            current_voice = None
+            resolved = {"provider": None, "voice": None, "voice_id": None, "voice_name": None}
             c_path = p / "config.yaml"
             if c_path.exists():
                 try:
                     c = load_yaml(c_path)
-                    tts = c.get("tts", {}) or {}
-                    tts_prov = tts.get("provider")
-                    if (tts_prov or "").strip().lower() == "edge":
-                        current_voice = (tts.get("edge") or {}).get("voice")
-                    else:
-                        prov_cfg = (tts.get("providers", {}) or {}).get(tts_prov or "", {}) or {}
-                        current_voice = prov_cfg.get("voice")
+                    resolved = resolve_profile_tts(c)
                 except Exception:
                     pass
 
             profiles.append({
                 "id": p.name,
                 "title": title,
-                "provider": tts_prov,
-                "voice": current_voice,
+                "provider": resolved["provider"],
+                "voice": resolved["voice"],
+                "voice_id": resolved["voice_id"],
+                "voice_name": resolved["voice_name"],
             })
 
     return profiles
