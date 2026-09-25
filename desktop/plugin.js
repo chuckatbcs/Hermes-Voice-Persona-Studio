@@ -1174,109 +1174,197 @@ function useGroupChatVoiceEnhancer({ autoReadGroup, botProfiles }) {
   const botProfilesRef = useRef(botProfiles);
   botProfilesRef.current = botProfiles;
 
-  const initializedRef = useRef(false);
+  const lastRoomRef = useRef('');
+  const prevAutoReadRef = useRef(autoReadGroup);
+
+  const isUserRow = (entryRow) => {
+    if (!entryRow) return false;
+    if (entryRow.classList.contains('rounded-md') && (
+      entryRow.className.includes('chrome-action-hover') ||
+      entryRow.querySelector('span.text-\\[0\\.7rem\\]')?.textContent?.trim().toLowerCase() === 'you'
+    )) {
+      return true;
+    }
+    const replyBtn = entryRow.querySelector('button[aria-label^="Reply to "]');
+    if (replyBtn) return false;
+    const nameBtn = entryRow.querySelector('button.text-left');
+    if (nameBtn) return false;
+    const speakerSpan = entryRow.querySelector('span.text-\\[0\\.7rem\\]');
+    if (speakerSpan && speakerSpan.textContent.trim().toLowerCase() === 'you') return true;
+    return false;
+  };
+
+  const getSpeakerFromRow = (entryRow) => {
+    if (!entryRow) return '';
+    const replyBtn = entryRow.querySelector('button[aria-label^="Reply to "]');
+    if (replyBtn) {
+      const aria = replyBtn.getAttribute('aria-label') || '';
+      const name = aria.replace(/^Reply to\s+/i, '').trim();
+      if (name) return name;
+    }
+    const nameBtn = entryRow.querySelector('button.text-left');
+    if (nameBtn) {
+      const name = (nameBtn.textContent || '').trim();
+      if (name && name.toLowerCase() !== 'you') return name;
+    }
+    return '';
+  };
+
+  const enqueueBotSpeech = (contentEl, entryRow, speaker) => {
+    const rawText = contentEl.innerText || contentEl.textContent || '';
+    const text = sanitizeTextForSpeech(rawText);
+    if (!text) return;
+
+    const profile = resolveProfileForSpeaker(speaker, botProfilesRef.current);
+    const profileId = profile ? profile.id : 'default';
+    const btn = entryRow.querySelector('.personastudio-group-speak');
+
+    groupSpeechQueue.enqueue({
+      id: contentEl,
+      speaker,
+      profileId,
+      text,
+      buttonEl: btn,
+      onStart: () => {
+        if (btn) {
+          btn.innerHTML = SVG_STOP_ICON;
+          btn.classList.add('text-primary');
+          btn.setAttribute('title', 'Stop reading');
+        }
+      },
+      onEnd: () => {
+        if (btn) {
+          btn.innerHTML = SVG_SPEAKER_ICON;
+          btn.classList.remove('text-primary');
+          btn.setAttribute('title', `Read aloud with ${speaker}`);
+        }
+      },
+      onError: () => {
+        if (btn) {
+          btn.innerHTML = SVG_SPEAKER_ICON;
+          btn.classList.remove('text-primary');
+          btn.setAttribute('title', `Read aloud with ${speaker}`);
+        }
+      }
+    });
+  };
 
   useEffect(() => {
-    // 1. Initial scan: mark existing messages so historical chat is not spoken aloud on load
-    const existing = document.querySelectorAll('div[data-slot="group-chat-message-content"]');
-    existing.forEach((el) => {
-      el.dataset.personastudioSeen = '1';
-    });
-    // Short delay before enabling auto-read to avoid catching messages rendering during initial mount
-    const timer = setTimeout(() => {
-      initializedRef.current = true;
-    }, 1200);
+    const justToggledOn = autoReadGroup && !prevAutoReadRef.current;
+    prevAutoReadRef.current = autoReadGroup;
 
-    const checkAndEnhanceMessage = (contentEl) => {
-      if (!contentEl || !contentEl.isConnected) return;
-      const entryRow = contentEl.closest('.group') || contentEl.parentElement;
-      if (!entryRow) return;
+    if (!autoReadGroup) {
+      groupSpeechQueue.stopAll();
+      return;
+    }
 
-      // Determine speaker
-      const replyBtn = entryRow.querySelector('button[aria-label^="Reply to "]');
-      let speaker = '';
-      if (replyBtn) {
-        const aria = replyBtn.getAttribute('aria-label') || '';
-        speaker = aria.replace(/^Reply to\s+/i, '').trim();
-      } else {
-        const nameBtn = entryRow.querySelector('button.text-left');
-        if (nameBtn) speaker = (nameBtn.textContent || '').trim();
+    if (justToggledOn) {
+      // When turning auto-read ON, only speak the LAST set of bot messages (latest turn)
+      const allRows = Array.from(document.querySelectorAll('div.grid.grid-cols-\\[minmax\\(0\\,1fr\\)\\] > div.group, div.group.flex.items-start.gap-2'));
+      let lastUserIdx = -1;
+      for (let i = allRows.length - 1; i >= 0; i--) {
+        if (isUserRow(allRows[i])) {
+          lastUserIdx = i;
+          break;
+        }
       }
 
-      // If user message, skip
-      if (!speaker || speaker.toLowerCase() === 'you') return;
-
-      // Inject Read Aloud button into action bar if not already present
-      const actionBar = entryRow.querySelector('div.ml-auto');
-      if (actionBar && !actionBar.querySelector('.personastudio-group-speak')) {
-        const btn = document.createElement('button');
-        btn.className = 'personastudio-group-speak inline-flex items-center justify-center rounded text-xs transition-colors hover:bg-muted text-muted-foreground hover:text-foreground h-6 w-6 p-0 shrink-0';
-        btn.setAttribute('type', 'button');
-        btn.setAttribute('title', `Read aloud with ${speaker}`);
-        btn.setAttribute('aria-label', `Read aloud with ${speaker}`);
-        btn.innerHTML = SVG_SPEAKER_ICON;
-
-        btn.onclick = (e) => {
-          e.stopPropagation();
-          e.preventDefault();
-
-          if (groupSpeechQueue.isSpeakingTask(contentEl)) {
-            groupSpeechQueue.stopAll();
-            return;
-          }
-
-          const rawText = contentEl.innerText || contentEl.textContent || '';
-          const text = sanitizeTextForSpeech(rawText);
-          if (!text) return;
-
-          const profile = resolveProfileForSpeaker(speaker, botProfilesRef.current);
-          const profileId = profile ? profile.id : 'default';
-
-          btn.innerHTML = SVG_LOADING_ICON;
-          btn.classList.add('text-primary');
-
-          groupSpeechQueue.enqueue({
-            id: contentEl,
-            speaker,
-            profileId,
-            text,
-            buttonEl: btn,
-            onStart: () => {
-              btn.innerHTML = SVG_STOP_ICON;
-              btn.classList.add('text-primary');
-              btn.setAttribute('title', 'Stop reading');
-            },
-            onEnd: () => {
-              btn.innerHTML = SVG_SPEAKER_ICON;
-              btn.classList.remove('text-primary');
-              btn.setAttribute('title', `Read aloud with ${speaker}`);
-            },
-            onError: () => {
-              btn.innerHTML = SVG_SPEAKER_ICON;
-              btn.classList.remove('text-primary');
-              btn.setAttribute('title', `Read aloud with ${speaker}`);
-            }
-          });
-        };
-
-        actionBar.appendChild(btn);
+      // Mark all historical rows up to lastUserIdx as already spoken so old chat is NEVER read
+      for (let i = 0; i <= lastUserIdx; i++) {
+        const cEl = allRows[i].querySelector('div[data-slot="group-chat-message-content"]');
+        if (cEl) {
+          cEl.dataset.personastudioSeen = '1';
+          cEl.dataset.personastudioSpoken = '1';
+        }
       }
 
-      // Auto-read logic for new incoming messages
-      if (initializedRef.current && autoReadRef.current && !contentEl.dataset.personastudioSpoken) {
-        if (!contentEl.dataset.personastudioSeen) {
-          contentEl.dataset.personastudioSeen = '1';
+      // Read only the bot replies that came after the last user message
+      const latestBotRows = lastUserIdx >= 0 ? allRows.slice(lastUserIdx + 1) : allRows.slice(-1);
+      latestBotRows.forEach(row => {
+        const cEl = row.querySelector('div[data-slot="group-chat-message-content"]');
+        if (!cEl || cEl.dataset.personastudioSpoken) return;
+        const speaker = getSpeakerFromRow(row);
+        if (!speaker || speaker.toLowerCase() === 'you') return;
+
+        cEl.dataset.personastudioSeen = '1';
+        cEl.dataset.personastudioSpoken = '1';
+        enqueueBotSpeech(cEl, row, speaker);
+      });
+    }
+  }, [autoReadGroup]);
+
+  useEffect(() => {
+    let scanTimeout = null;
+
+    const processGroupChat = () => {
+      // Check current room
+      const roomHeaderEl = document.querySelector('div.min-w-0.flex-1.truncate.text-sm.font-semibold');
+      const currentRoom = roomHeaderEl ? (roomHeaderEl.textContent || '').trim() : '';
+
+      // If switched into a new room, mark existing messages as historical (spoken)
+      if (currentRoom && currentRoom !== lastRoomRef.current) {
+        lastRoomRef.current = currentRoom;
+        const existingMessages = document.querySelectorAll('div[data-slot="group-chat-message-content"]');
+        existingMessages.forEach((el) => {
+          el.dataset.personastudioSeen = '1';
+          el.dataset.personastudioSpoken = '1';
+        });
+      }
+
+      const allRows = Array.from(document.querySelectorAll('div.grid.grid-cols-\\[minmax\\(0\\,1fr\\)\\] > div.group, div.group.flex.items-start.gap-2'));
+      if (allRows.length === 0) return;
+
+      // Find last user row index
+      let lastUserIdx = -1;
+      for (let i = allRows.length - 1; i >= 0; i--) {
+        if (isUserRow(allRows[i])) {
+          lastUserIdx = i;
+          break;
+        }
+      }
+
+      // Process each row: inject buttons and handle auto-read for latest turn
+      allRows.forEach((entryRow, idx) => {
+        const contentEl = entryRow.querySelector('div[data-slot="group-chat-message-content"]');
+        if (!contentEl) return;
+
+        const isUser = isUserRow(entryRow);
+        if (isUser) {
           contentEl.dataset.personastudioSpoken = '1';
+          return;
+        }
 
-          // Delay slightly (350ms) to ensure full message turn has landed
-          setTimeout(() => {
+        const speaker = getSpeakerFromRow(entryRow);
+        if (!speaker || speaker.toLowerCase() === 'you') return;
+
+        // 1. Inject manual Read Aloud button if missing
+        const actionBar = entryRow.querySelector('div.ml-auto');
+        if (actionBar && !actionBar.querySelector('.personastudio-group-speak')) {
+          const btn = document.createElement('button');
+          btn.className = 'personastudio-group-speak inline-flex items-center justify-center rounded text-xs transition-colors hover:bg-muted text-muted-foreground hover:text-foreground h-6 w-6 p-0 shrink-0';
+          btn.setAttribute('type', 'button');
+          btn.setAttribute('title', `Read aloud with ${speaker}`);
+          btn.setAttribute('aria-label', `Read aloud with ${speaker}`);
+          btn.innerHTML = SVG_SPEAKER_ICON;
+
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+
+            if (groupSpeechQueue.isSpeakingTask(contentEl)) {
+              groupSpeechQueue.stopAll();
+              return;
+            }
+
             const rawText = contentEl.innerText || contentEl.textContent || '';
             const text = sanitizeTextForSpeech(rawText);
             if (!text) return;
 
             const profile = resolveProfileForSpeaker(speaker, botProfilesRef.current);
             const profileId = profile ? profile.id : 'default';
-            const btn = entryRow.querySelector('.personastudio-group-speak');
+
+            btn.innerHTML = SVG_LOADING_ICON;
+            btn.classList.add('text-primary');
 
             groupSpeechQueue.enqueue({
               id: contentEl,
@@ -1285,40 +1373,54 @@ function useGroupChatVoiceEnhancer({ autoReadGroup, botProfiles }) {
               text,
               buttonEl: btn,
               onStart: () => {
-                if (btn) {
-                  btn.innerHTML = SVG_STOP_ICON;
-                  btn.classList.add('text-primary');
-                  btn.setAttribute('title', 'Stop reading');
-                }
+                btn.innerHTML = SVG_STOP_ICON;
+                btn.classList.add('text-primary');
+                btn.setAttribute('title', 'Stop reading');
               },
               onEnd: () => {
-                if (btn) {
-                  btn.innerHTML = SVG_SPEAKER_ICON;
-                  btn.classList.remove('text-primary');
-                  btn.setAttribute('title', `Read aloud with ${speaker}`);
-                }
+                btn.innerHTML = SVG_SPEAKER_ICON;
+                btn.classList.remove('text-primary');
+                btn.setAttribute('title', `Read aloud with ${speaker}`);
               },
               onError: () => {
-                if (btn) {
-                  btn.innerHTML = SVG_SPEAKER_ICON;
-                  btn.classList.remove('text-primary');
-                  btn.setAttribute('title', `Read aloud with ${speaker}`);
-                }
+                btn.innerHTML = SVG_SPEAKER_ICON;
+                btn.classList.remove('text-primary');
+                btn.setAttribute('title', `Read aloud with ${speaker}`);
               }
             });
+          };
+
+          actionBar.appendChild(btn);
+        }
+
+        // 2. Auto-read logic: only allow rows that are part of the latest turn (after lastUserIdx)
+        if (lastUserIdx >= 0 && idx <= lastUserIdx) {
+          // Historical turn before latest user message: never auto-speak
+          contentEl.dataset.personastudioSpoken = '1';
+          return;
+        }
+
+        if (autoReadRef.current && !contentEl.dataset.personastudioSpoken) {
+          contentEl.dataset.personastudioSpoken = '1';
+          contentEl.dataset.personastudioSeen = '1';
+
+          // Delay slightly (350ms) to ensure turn rendering has completed
+          setTimeout(() => {
+            enqueueBotSpeech(contentEl, entryRow, speaker);
           }, 350);
         }
-      }
+      });
     };
 
-    const scanAll = () => {
-      const messages = document.querySelectorAll('div[data-slot="group-chat-message-content"]');
-      messages.forEach(checkAndEnhanceMessage);
+    const debouncedScan = () => {
+      if (scanTimeout) clearTimeout(scanTimeout);
+      scanTimeout = setTimeout(processGroupChat, 60);
     };
-    scanAll();
+
+    debouncedScan();
 
     const observer = new MutationObserver(() => {
-      scanAll();
+      debouncedScan();
     });
 
     observer.observe(document.body, {
@@ -1327,7 +1429,7 @@ function useGroupChatVoiceEnhancer({ autoReadGroup, botProfiles }) {
     });
 
     return () => {
-      clearTimeout(timer);
+      if (scanTimeout) clearTimeout(scanTimeout);
       observer.disconnect();
     };
   }, []);
