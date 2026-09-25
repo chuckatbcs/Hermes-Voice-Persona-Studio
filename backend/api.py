@@ -27,6 +27,27 @@ PROVIDERS: Dict[str, BaseTTSProvider] = {
     "voicebox": voicebox_provider,
 }
 
+def _normalize_pack_engine(engine: Optional[str]) -> Optional[str]:
+    text = str(engine or "").strip()
+    return text or None
+
+
+def _sync_voicebox_engine(provider: str, voice_id: str, engine: Optional[str]) -> None:
+    """Best-effort: write pack engine onto the Voicebox profile default_engine."""
+    if not engine:
+        return
+    if str(provider or "").strip().lower() not in ("voicebox", "vb"):
+        return
+    vid = str(voice_id or "").strip()
+    if not vid or vid in ("default", "none", "null"):
+        return
+    try:
+        voicebox_provider.update_default_engine(vid, engine)
+    except Exception as e:
+        print(f"[PersonaStudio] Voicebox engine sync skipped: {e}")
+
+
+
 
 class AuditionRequest(BaseModel):
     text: str
@@ -48,6 +69,7 @@ class CreatePersonaRequest(BaseModel):
     speed: float = 1.0
     temperature: float = 0.7
     character_strength: Optional[Any] = 25
+    engine: Optional[str] = None
     tags: Optional[List[str]] = None
 
 
@@ -61,6 +83,7 @@ class UpdatePersonaRequest(BaseModel):
     speed: Optional[float] = None
     temperature: Optional[float] = None
     character_strength: Optional[Any] = None
+    engine: Optional[str] = None
     tags: Optional[List[str]] = None
 
 
@@ -109,7 +132,8 @@ def list_clone_models(provider: str = "voicebox") -> List[Dict[str, Any]]:
     """Return available engines/models for cloning and synthesis."""
     if provider == "voicebox":
         return [
-            {"id": "qwen_fast", "name": "Qwen 3 (0.6B - ⚡ Instant ~0.4s Lag, Low VRAM, Local GPU)", "recommended": True},
+            {"id": "luxtts", "name": "LuxTTS (Fast, CPU/GPU-friendly ~1.2s, High Quality)", "recommended": True},
+            {"id": "qwen_fast", "name": "Qwen 3 (0.6B - ⚡ Instant ~0.4s Lag, Low VRAM, Local GPU)", "recommended": False},
             {"id": "qwen", "name": "Qwen 3 (1.7B Standard, Deep Expressiveness, Local GPU)", "recommended": False},
             {"id": "chatterbox_turbo", "name": "Chatterbox Turbo (High Emotion, Tag-Aware, Local GPU)", "recommended": False},
             {"id": "chatterbox", "name": "Chatterbox Standard (Deep Neural Voice, Local GPU)", "recommended": False},
@@ -311,6 +335,7 @@ def resolve_tts(req: ResolveTtsRequest) -> Dict[str, Any]:
 def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
     pid = req.id or persona_sync.slugify_persona_id(req.name)
     prompt = (req.system_prompt or "").strip() or persona_sync.fallback_system_prompt(req.name)
+    engine = _normalize_pack_engine(req.engine)
     bundle = PersonaBundle(
         id=pid,
         name=req.name,
@@ -322,10 +347,13 @@ def save_persona(req: CreatePersonaRequest) -> Dict[str, Any]:
         speed=req.speed,
         temperature=req.temperature,
         character_strength=persona_sync.character_strength_percent(req.character_strength),
+        engine=engine,
         tags=req.tags or [],
     )
     saved = storage.save_persona(bundle)
-    return {"ok": True, "created": True, "persona": saved.to_dict()}
+    _sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)
+    data = saved.to_dict()
+    return {"ok": True, "created": True, "persona": data}
 
 
 @router.put("/personas/{persona_id}")
@@ -352,9 +380,12 @@ def update_persona(persona_id: str, req: UpdatePersonaRequest) -> Dict[str, Any]
         existing.temperature = float(req.temperature)
     if req.character_strength is not None:
         existing.character_strength = persona_sync.character_strength_percent(req.character_strength)
+    if req.engine is not None:
+        existing.engine = _normalize_pack_engine(req.engine)
     if req.tags is not None:
         existing.tags = req.tags
     saved = storage.save_persona(existing)
+    _sync_voicebox_engine(saved.provider, saved.voice_id, saved.engine)
     data = saved.to_dict()
     data["character_strength"] = persona_sync.character_strength_percent(saved.character_strength)
     return {"ok": True, "updated": True, "persona": data}

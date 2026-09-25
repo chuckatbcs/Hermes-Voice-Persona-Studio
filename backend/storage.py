@@ -45,6 +45,7 @@ class PersonaBundle:
     speed: float = 1.0
     temperature: float = 0.7
     character_strength: int = 25
+    engine: Optional[str] = None  # Voicebox default_engine / Fish model id
     created_at: float = 0.0
     updated_at: float = 0.0
     tags: Optional[List[str]] = None
@@ -65,6 +66,7 @@ class PersonaBundle:
             speed=float(data.get("speed", 1.0)),
             temperature=float(data.get("temperature", 0.7)),
             character_strength=_coerce_character_strength_percent(data.get("character_strength")),
+            engine=(str(data["engine"]).strip() if data.get("engine") not in (None, "") else None),
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
             tags=data.get("tags") or [],

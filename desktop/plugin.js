@@ -232,7 +232,9 @@ function hydrateFormFromPack(pack) {
     selectedVoice: pack.voice_id && pack.voice_id !== 'default' ? pack.voice_id : '',
     speed: pack.speed != null ? pack.speed : 1.0,
     temperature: pack.temperature != null ? pack.temperature : 0.7,
-    characterStrength: characterStrengthPercent(pack.character_strength)
+    characterStrength: characterStrengthPercent(pack.character_strength),
+    // Voice model = Voicebox default_engine / Fish model id (Synthesis engine dropdown).
+    engine: pack.engine || pack.default_engine || ''
   };
 }
 
@@ -258,7 +260,8 @@ function personaSaveRequest(fields) {
     voice_name: fields.voiceName || fields.selectedVoice || resolvedName,
     speed: parseFloat(fields.speed),
     temperature: parseFloat(fields.temperature),
-    character_strength: characterStrengthPercent(fields.characterStrength)
+    character_strength: characterStrengthPercent(fields.characterStrength),
+    engine: fields.engine || fields.selectedModel || (selectedPack && selectedPack.engine) || null
   };
   if (isUpdate) body.id = id;
   return {
@@ -1237,10 +1240,11 @@ function TitlebarPersonaPicker({ openStudio, personas, voices, refreshPersonas, 
 
 // ── Voice & Persona Studio Dialog Modal ───────────────────────────────────
 function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebarApiRef }) {
+  const [activeTab, setActiveTab] = useState('apply'); // 'apply' | 'builder'
   const [provider, setProvider] = useState('fish_audio');
   const [voices, setVoices] = useState([]);
   const [models, setModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useState('chatterbox_turbo');
+  const [selectedModel, setSelectedModel] = useState('luxtts');
   const [selectedVoice, setSelectedVoice] = useState('');
   const [name, setName] = useState('');
   const [avatar, setAvatar] = useState('🤖');
@@ -1306,7 +1310,11 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
         setModels(mList);
         if (mList.length > 0) {
           const rec = mList.find(m => m.recommended) || mList[0];
-          setSelectedModel(rec.id);
+          // Keep an in-list selection (incl. pack-hydrated engine). Only default to recommended when unset.
+          setSelectedModel((prev) => {
+            if (prev && mList.some((m) => m.id === prev)) return prev;
+            return rec.id;
+          });
         }
       }
 
@@ -1368,6 +1376,15 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
     setCharacterStrength(hydrated.characterStrength);
     setSpeed(hydrated.speed);
     setTemperature(hydrated.temperature);
+    // Prefer pack.engine; else Voicebox profile default_engine for the bound voice.
+    const voiceEngine = (() => {
+      if (hydrated.engine) return hydrated.engine;
+      const vid = hydrated.selectedVoice;
+      if (!vid) return '';
+      const match = (voices || []).find((v) => v && v.id === vid);
+      return (match && (match.default_engine || (match.extra && match.extra.engine))) || '';
+    })();
+    if (voiceEngine) setSelectedModel(voiceEngine);
     if (hydrated.provider && hydrated.provider !== provider) {
       pendingVoiceRef.current = hydrated.selectedVoice;
       setProvider(hydrated.provider);
@@ -1521,7 +1538,9 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
       voiceName: chosenV ? chosenV.name : selectedVoice,
       speed: speed,
       temperature: temperature,
-      characterStrength: characterStrength
+      characterStrength: characterStrength,
+      engine: selectedModel,
+      selectedModel: selectedModel
     });
     if (plan.error) return { ok: false, error: plan.error, plan };
     const res = await fetch(`${API_BASE}${plan.url}`, {
@@ -1702,504 +1721,641 @@ function StudioModal({ open, onOpenChange, refreshPersonas, overlayRef, titlebar
         jsxs(DialogHeader, {
           children: [
             jsx(DialogTitle, { className: 'text-lg font-bold flex items-center gap-2', children: '🎙️ Hermes Voice & Persona Studio' }),
-            jsx('p', { className: 'text-xs text-muted-foreground', children: 'Apply a speaking persona to the focused Hermes profile. Fish vs Voicebox and Character strength are labeled below.' })
+            jsx('p', { className: 'text-xs text-muted-foreground', children: 'Speaking personas, voice cloning, and live session apply for Hermes Desktop.' })
           ]
         }),
 
         jsxs('div', {
-          className: 'space-y-3 my-4 max-h-[70vh] overflow-y-auto pr-2',
+          className: 'flex border-b border-border/80 my-2 gap-1 bg-muted/20 p-1 rounded-lg',
           children: [
-            jsxs('div', {
-              className: 'p-3 border border-primary/40 rounded-lg space-y-2 bg-primary/5',
+            jsx('button', {
+              type: 'button',
+              onClick: () => setActiveTab('apply'),
+              className: `flex-1 py-1.5 px-3 text-xs font-semibold rounded transition-colors flex items-center justify-center gap-1.5 ${
+                activeTab === 'apply'
+                  ? 'bg-background text-primary shadow-sm border border-border/50'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+              }`,
               children: [
-                jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Target profile' }),
-                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Apply writes to this focused Hermes profile’s current chat only. Switching bots changes the target.' }),
-                jsxs('div', {
-                  className: 'flex items-baseline justify-between gap-2',
-                  children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Focused Hermes profile' }),
-                    jsx('span', { className: 'text-sm font-semibold text-foreground', children: targetProfile || 'default' })
-                  ]
-                })
+                jsx('span', { children: '🎯' }),
+                jsx('span', { children: 'Apply & Persona Selection' })
               ]
             }),
-
-            jsxs('div', {
-              className: 'p-3 border border-border/70 rounded-lg space-y-3 bg-muted/10',
+            jsx('button', {
+              type: 'button',
+              onClick: () => setActiveTab('builder'),
+              className: `flex-1 py-1.5 px-3 text-xs font-semibold rounded transition-colors flex items-center justify-center gap-1.5 ${
+                activeTab === 'builder'
+                  ? 'bg-background text-primary shadow-sm border border-border/50'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+              }`,
               children: [
-                jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Choose persona' }),
-                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Pick a pack to hydrate. Labels show Fish (cloud clone) vs Voicebox (local GPU). Apply uses the provider you select here.' }),
-                jsxs('div', {
-                  className: 'space-y-1',
-                  children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Persona pack' }),
-                    jsx('select', {
-                      value: editingPackId || '__new__',
-                      onChange: (e) => {
-                        const id = e.target.value;
-                        if (!id || id === '__new__') applyPackToForm(null);
-                        else applyPackToForm(studioPacks.find((p) => p.id === id) || null);
-                      },
-                      className: 'w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
-                      children: [
-                        jsx('option', { value: '__new__', children: '✨ New persona pack' }),
-                        ...(studioPacks || []).map((p) =>
-                          jsx('option', {
-                            key: p.id,
-                            value: p.id,
-                            children: `${p.avatar || '🎭'} ${p.name} · ${providerLabel(p.provider)} · ${characterStrengthPercent(p.character_strength)}%`
-                          })
-                        )
-                      ]
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'grid grid-cols-4 gap-2',
-                  children: [
-                    jsxs('div', {
-                      className: 'col-span-1',
-                      children: [
-                        jsx('label', { className: 'text-xs font-medium', children: 'Avatar' }),
-                        jsx(Input, {
-                          value: avatar,
-                          onChange: (e) => setAvatar(e.target.value),
-                          className: 'text-xs h-8 text-center'
-                        })
-                      ]
-                    }),
-                    jsxs('div', {
-                      className: 'col-span-3',
-                      children: [
-                        jsx('label', { className: 'text-xs font-medium', children: 'Persona name' }),
-                        jsx(Input, {
-                          value: name,
-                          onChange: (e) => setName(e.target.value),
-                          placeholder: editingPackId ? 'Uses selected pack name if left blank' : 'e.g. Jarvis Butler, Storyteller',
-                          className: 'text-xs h-8'
-                        })
-                      ]
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'space-y-1',
-                  children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Voice provider' }),
-                    jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Fish Audio is the cloud clone. Voicebox is the local GPU clone. Apply pins the selected provider (Fish uses --fish-voice).' }),
-                    jsxs('div', {
-                      className: 'flex gap-2 p-1 bg-muted/30 rounded border border-border/40',
-                      children: [
-                        jsx(Button, {
-                          size: 'sm',
-                          variant: provider === 'fish_audio' ? 'default' : 'ghost',
-                          className: 'flex-1 text-xs h-8',
-                          onClick: () => setProvider('fish_audio'),
-                          children: 'Fish Audio (cloud)'
-                        }),
-                        jsx(Button, {
-                          size: 'sm',
-                          variant: provider === 'voicebox' ? 'default' : 'ghost',
-                          className: 'flex-1 text-xs h-8',
-                          onClick: () => setProvider('voicebox'),
-                          children: 'Voicebox (local GPU)'
-                        })
-                      ]
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'space-y-1',
-                  children: [
-                    jsxs('label', { className: 'text-xs font-medium flex items-center justify-between', children: [
-                      jsx('span', { children: `Voice / clone (${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'})` }),
-                      jsx('span', { className: 'text-[10px] text-muted-foreground font-normal', children: `${voices.filter(v => v.voice_type === 'cloned').length} clones` })
-                    ] }),
-                    jsxs('div', {
-                      className: 'flex gap-2 items-center',
-                      children: [
-                        jsx('select', {
-                          value: selectedVoice,
-                          onChange: (e) => setSelectedVoice(e.target.value),
-                          className: 'flex-1 h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring font-medium',
-                          children: voices.map(v =>
-                            jsx('option', { key: v.id, value: v.id, children: `${v.voice_type === 'cloned' ? 'Clone' : 'Preset'} · ${v.name} · ${providerLabel(v.provider)}` })
-                          )
-                        }),
-                        jsx(Button, {
-                          size: 'sm',
-                          variant: 'outline',
-                          onClick: () => loadData(provider),
-                          className: 'h-9 text-xs',
-                          title: 'Refresh voice list from the selected provider',
-                          children: 'Refresh list'
-                        }),
-                        jsx(Button, {
-                          size: 'sm',
-                          variant: showManager ? 'default' : 'outline',
-                          onClick: () => setShowManager(!showManager),
-                          className: 'h-9 text-xs',
-                          title: 'Manage, delete, or re-sample voices',
-                          children: showManager ? 'Close manager' : 'Manage voices'
-                        })
-                      ]
-                    })
-                  ]
-                }),
-                showManager && jsxs('div', {
-                  className: 'p-3 border border-border/80 rounded-lg bg-muted/20 space-y-2.5',
-                  children: [
-                    jsxs('div', {
-                      className: 'flex items-center justify-between border-b border-border/40 pb-1.5',
-                      children: [
-                        jsx('span', { className: 'text-xs font-bold text-foreground', children: `Manage cloned voices on ${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'}` }),
-                        jsx(Input, {
-                          value: filterQuery,
-                          onChange: (e) => setFilterQuery(e.target.value),
-                          placeholder: 'Filter by name…',
-                          className: 'h-7 w-44 text-[11px]'
-                        })
-                      ]
-                    }),
-                    jsxs('div', {
-                      className: 'max-h-52 overflow-y-auto space-y-1.5 pr-1',
-                      children: voices.filter(v => v.voice_type === 'cloned' && (!filterQuery || v.name.toLowerCase().includes(filterQuery.toLowerCase()))).length === 0
-                        ? jsx('div', { className: 'text-center py-3 text-xs text-muted-foreground', children: 'No cloned voices match filter.' })
-                        : voices
-                            .filter(v => v.voice_type === 'cloned' && (!filterQuery || v.name.toLowerCase().includes(filterQuery.toLowerCase())))
-                            .map(v =>
-                              jsxs('div', {
-                                key: v.id,
-                                className: 'flex items-center justify-between p-2 rounded bg-background border border-border/60 text-xs shadow-sm',
-                                children: [
-                                  jsxs('div', {
-                                    className: 'flex flex-col overflow-hidden mr-2',
-                                    children: [
-                                      jsx('span', { className: 'font-semibold truncate text-foreground', children: v.name }),
-                                      jsx('span', { className: 'text-[10px] text-muted-foreground truncate font-mono', children: `ID: ${v.id.substring(0, 16)}...` })
-                                    ]
-                                  }),
-                                  jsxs('div', {
-                                    className: 'flex items-center gap-1.5 shrink-0',
-                                    children: [
-                                      jsx('label', {
-                                        className: 'cursor-pointer px-2 py-1 bg-muted hover:bg-muted/80 rounded text-[11px] font-medium border border-border/60 transition-colors',
-                                        title: 'Upload a newer reference sample for this voice',
-                                        children: [
-                                          'Re-sample',
-                                          jsx('input', {
-                                            type: 'file',
-                                            accept: 'audio/*',
-                                            className: 'hidden',
-                                            onChange: (e) => {
-                                              if (e.target.files && e.target.files[0]) {
-                                                handleResampleVoice(v.id, v.name, e.target.files[0]);
-                                              }
-                                            }
-                                          })
-                                        ]
-                                      }),
-                                      jsx(Button, {
-                                        size: 'sm',
-                                        variant: 'destructive',
-                                        className: 'h-6 px-2 text-[11px]',
-                                        onClick: () => handleDeleteVoice(v.id, v.name),
-                                        disabled: isManagingVoice,
-                                        title: 'Delete this cloned voice',
-                                        children: 'Delete'
-                                      })
-                                    ]
-                                  })
-                                ]
-                              })
-                            )
-                    })
-                  ]
-                })
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 border border-primary/30 rounded-lg space-y-2 bg-primary/5',
-              children: [
-                jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Character strength' }),
-                jsxs('label', {
-                  className: 'text-xs font-medium flex justify-between',
-                  children: [
-                    'Character strength (LLM) — 0% = profile soul only, 100% = character replaces soul for this session',
-                    `${characterStrengthLabel(characterStrength)} (${characterStrength}%)`
-                  ]
-                }),
-                jsx('input', {
-                  type: 'range',
-                  min: '0',
-                  max: '100',
-                  step: '1',
-                  value: characterStrength,
-                  onChange: (e) => setCharacterStrength(e.target.value),
-                  className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1',
-                  'aria-label': 'Character strength'
-                }),
-                jsx('p', {
-                  className: 'text-[10px] text-muted-foreground',
-                  children: '0% = no style overlay (soul only). Soft 1–40 / Medium 41–70 / Heavy 71–99 blend character vs SOUL. 100% = character eclipses SOUL for this session. This is not TTS Temperature.'
-                })
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 border border-primary/50 rounded-lg space-y-2 bg-primary/10',
-              children: [
-                jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Apply' }),
-                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Primary action: overlay this persona + voice on the focused profile’s current chat. Save pack and preview are secondary.' }),
-                jsx(Button, {
-                  size: 'sm',
-                  onClick: handleApplyToChat,
-                  disabled: isApplying,
-                  className: 'w-full h-10 text-sm font-semibold bg-primary text-primary-foreground',
-                  children: isApplying ? 'Applying…' : 'Apply to this chat'
-                }),
-                jsxs('div', {
-                  className: 'flex flex-wrap gap-2',
-                  children: [
-                    jsx(Button, {
-                      size: 'sm',
-                      variant: 'outline',
-                      onClick: handleAudition,
-                      disabled: isAuditioning || !selectedVoice,
-                      className: 'text-xs h-8',
-                      children: isAuditioning ? 'Generating preview…' : 'Preview voice'
-                    }),
-                    jsx(Button, {
-                      size: 'sm',
-                      variant: 'outline',
-                      onClick: handleSavePersona,
-                      className: 'text-xs h-8',
-                      children: editingPackId ? 'Save pack' : 'Save as new pack'
-                    }),
-                    jsx(Button, {
-                      size: 'sm',
-                      variant: 'ghost',
-                      onClick: handleResetStock,
-                      className: 'text-xs h-8 text-muted-foreground',
-                      children: 'Reset to stock Hermes'
-                    })
-                  ]
-                }),
-                selectedPack || selectedVoiceRecord
-                  ? jsx('p', {
-                    className: 'text-[10px] text-muted-foreground',
-                    children: `Will apply ${name || (selectedPack && selectedPack.name) || 'this pack'} · ${providerLabel(provider)}${selectedVoiceRecord ? ` (${selectedVoiceRecord.name})` : ''} at ${characterStrength}%`
-                  })
-                  : null
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 border border-border/70 rounded-lg space-y-1 bg-muted/10',
-              children: [
-                jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Current applied state' }),
-                jsx('p', { className: 'text-xs font-medium text-foreground', children: liveCopy.headline }),
-                jsx('p', { className: 'text-[10px] text-muted-foreground', children: liveCopy.detail }),
-                statusMessage && jsx('div', {
-                  className: 'text-xs px-2.5 py-1.5 rounded bg-muted/60 text-muted-foreground border border-border/50 mt-1',
-                  children: statusMessage
-                })
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 border border-border/50 rounded-lg space-y-2 bg-card/40',
-              children: [
-                jsx('div', { className: 'text-xs font-bold text-muted-foreground', children: 'Speaking style (optional edit)' }),
-                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Mannerisms for replies. Saved with the pack. Character strength controls how hard this overlays SOUL.' }),
-                jsx('label', { className: 'text-xs font-medium', children: 'Speaking style / prompt' }),
-                jsx(Textarea, {
-                  value: systemPrompt,
-                  onChange: (e) => setSystemPrompt(e.target.value),
-                  placeholder: 'Define how this assistant speaks, vocabulary rules, mannerisms...',
-                  className: 'text-xs min-h-[80px]'
-                })
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 border border-border/50 rounded-lg space-y-3 bg-card/40',
-              children: [
-                jsx('div', { className: 'text-xs font-bold text-muted-foreground', children: 'Voice preview & TTS' }),
-                jsxs('div', {
-                  className: 'space-y-1',
-                  children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Synthesis engine' }),
-                    jsx('select', {
-                      value: selectedModel,
-                      onChange: (e) => setSelectedModel(e.target.value),
-                      className: 'w-full h-8 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
-                      children: models.map(m =>
-                        jsx('option', { key: m.id, value: m.id, children: `${m.name}${m.recommended ? ' ★ (Recommended)' : ''}` })
-                      )
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'grid grid-cols-2 gap-4',
-                  children: [
-                    jsxs('div', {
-                      children: [
-                        jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Speed (TTS)', `${speed}x`] }),
-                        jsx('input', {
-                          type: 'range',
-                          min: '0.7',
-                          max: '1.5',
-                          step: '0.05',
-                          value: speed,
-                          onChange: (e) => setSpeed(e.target.value),
-                          className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1',
-                          'aria-label': 'TTS speed'
-                        })
-                      ]
-                    }),
-                    jsxs('div', {
-                      children: [
-                        jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Temperature / Expressiveness (TTS only)', `${temperature}`] }),
-                        jsx('input', {
-                          type: 'range',
-                          min: '0.1',
-                          max: '1.0',
-                          step: '0.05',
-                          value: temperature,
-                          onChange: (e) => setTemperature(e.target.value),
-                          className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1',
-                          'aria-label': 'TTS temperature'
-                        })
-                      ]
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'space-y-1',
-                  children: [
-                    jsx('label', { className: 'text-xs font-medium', children: 'Preview text' }),
-                    jsx(Input, {
-                      value: previewText,
-                      onChange: (e) => setPreviewText(e.target.value),
-                      placeholder: 'Text to speak…',
-                      className: 'text-xs h-8'
-                    })
-                  ]
-                })
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 border border-border/50 rounded-lg bg-card/40 space-y-3',
-              children: [
-                jsxs('div', {
-                  className: 'flex items-center justify-between border-b border-border/40 pb-1.5',
-                  children: [
-                    jsx('div', { className: 'text-xs font-bold text-muted-foreground', children: `Clone a new voice — ${provider === 'fish_audio' ? 'Fish Audio (cloud)' : 'Voicebox (local GPU)'}` }),
-                    jsx('span', { className: 'text-[10px] text-muted-foreground', children: 'WAV, MP3, or M4A' })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'grid grid-cols-2 gap-2',
-                  children: [
-                    jsxs('div', {
-                      className: 'space-y-1',
-                      children: [
-                        jsx('label', { className: 'text-[11px] font-medium text-foreground', children: 'New cloned voice name' }),
-                        jsx(Input, {
-                          value: cloneName,
-                          onChange: (e) => setCloneName(e.target.value),
-                          placeholder: 'e.g. Chuck Voice',
-                          className: 'text-xs h-8'
-                        })
-                      ]
-                    }),
-                    jsxs('div', {
-                      className: 'space-y-1',
-                      children: [
-                        jsx('label', { className: 'text-[11px] font-medium text-foreground', children: 'Target engine / model' }),
-                        jsx('select', {
-                          value: selectedModel,
-                          onChange: (e) => setSelectedModel(e.target.value),
-                          className: 'w-full h-8 rounded-md border border-input bg-background px-2 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
-                          children: models.map(m =>
-                            jsx('option', { key: m.id, value: m.id, children: `${m.name}${m.recommended ? ' ★' : ''}` })
-                          )
-                        })
-                      ]
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'space-y-1',
-                  children: [
-                    jsx('label', { className: 'text-[11px] font-medium text-foreground', children: 'Reference audio sample' }),
-                    jsx('input', {
-                      type: 'file',
-                      accept: 'audio/*',
-                      onChange: (e) => setCloneFile(e.target.files[0]),
-                      className: 'w-full text-xs text-muted-foreground file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-muted file:text-foreground hover:file:opacity-90'
-                    })
-                  ]
-                }),
-                jsx(Button, {
-                  size: 'sm',
-                  variant: 'outline',
-                  onClick: handleCloneUpload,
-                  disabled: isCloning || !cloneFile || !cloneName,
-                  className: 'text-xs h-8 w-full mt-1',
-                  children: isCloning ? `Cloning on ${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'}…` : `Upload & clone to ${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'}`
-                })
-              ]
-            }),
-
-            jsxs('div', {
-              className: 'p-3 bg-muted/10 border border-border/50 rounded space-y-2',
-              children: [
-                jsx('div', { className: 'text-xs font-bold text-muted-foreground', children: 'Group-chat voice bind' }),
-                jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Assigns TTS keys for @mentions in group chats. This is not the session Apply button above.' }),
-                jsxs('div', {
-                  className: 'flex items-center justify-between',
-                  children: [
-                    jsx('label', { className: 'text-xs font-medium text-foreground', children: 'Hermes bot / profile' }),
-                    botProfiles.length > 0 && selectedBotProfile && jsx('span', {
-                      className: 'text-[11px] text-muted-foreground',
-                      children: `Current TTS: ${(botProfiles.find(b => b.id === selectedBotProfile)?.voice) || 'none'}`
-                    })
-                  ]
-                }),
-                jsxs('div', {
-                  className: 'flex gap-2 items-center',
-                  children: [
-                    jsx('select', {
-                      value: selectedBotProfile,
-                      onChange: (e) => setSelectedBotProfile(e.target.value),
-                      className: 'flex-1 h-8 rounded border border-border bg-background px-2 text-xs text-foreground',
-                      children: botProfiles.length === 0
-                        ? jsx('option', { value: '', children: 'No profiles detected' })
-                        : botProfiles.map(b =>
-                            jsx('option', {
-                              key: b.id,
-                              value: b.id,
-                              children: `${b.title} (${b.id}) [TTS: ${b.provider || 'none'}]`
-                            })
-                          )
-                    }),
-                    jsx(Button, {
-                      size: 'sm',
-                      variant: 'outline',
-                      onClick: handleAssignVoiceToBot,
-                      disabled: isAssigning || !selectedVoice || !selectedBotProfile,
-                      className: 'text-xs h-8 px-3 shrink-0',
-                      children: isAssigning ? 'Assigning…' : 'Assign voice to bot'
-                    })
-                  ]
-                })
+                jsx('span', { children: '🛠️' }),
+                jsx('span', { children: 'Voice Builder & Creation' })
               ]
             })
           ]
+        }),
+
+        jsxs('div', {
+          className: 'space-y-3 my-2 max-h-[68vh] overflow-y-auto pr-2',
+          children: activeTab === 'apply'
+            ? [
+              // ── Tab 1: Apply & Persona Selection ──
+              jsxs('div', {
+                className: 'p-3 border border-primary/40 rounded-lg space-y-2 bg-primary/5',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Target profile' }),
+                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Apply writes to this focused Hermes profile’s current chat only. Switching bots changes the target.' }),
+                  jsxs('div', {
+                    className: 'flex items-baseline justify-between gap-2',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Focused Hermes profile' }),
+                      jsx('span', { className: 'text-sm font-semibold text-foreground', children: targetProfile || 'default' })
+                    ]
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-border/70 rounded-lg space-y-3 bg-muted/10',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Choose persona' }),
+                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Select an existing persona pack to apply. Labels show Fish (cloud) vs Voicebox (local GPU).' }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Persona pack' }),
+                      jsx('select', {
+                        value: editingPackId || '__new__',
+                        onChange: (e) => {
+                          const id = e.target.value;
+                          if (!id || id === '__new__') applyPackToForm(null);
+                          else applyPackToForm(studioPacks.find((p) => p.id === id) || null);
+                        },
+                        className: 'w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
+                        children: [
+                          jsx('option', { value: '__new__', children: '✨ New persona pack (create in Builder)' }),
+                          ...(studioPacks || []).map((p) =>
+                            jsx('option', {
+                              key: p.id,
+                              value: p.id,
+                              children: `${p.avatar || '🎭'} ${p.name} · ${providerLabel(p.provider)} · ${characterStrengthPercent(p.character_strength)}%`
+                            })
+                          )
+                        ]
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'flex items-center justify-between pt-1 text-xs',
+                    children: [
+                      selectedPack
+                        ? jsxs('div', {
+                          className: 'flex items-center gap-1.5 text-muted-foreground text-[11px]',
+                          children: [
+                            jsx('span', { className: 'text-base', children: selectedPack.avatar || '🎭' }),
+                            jsx('span', { className: 'font-semibold text-foreground', children: selectedPack.name }),
+                            jsx('span', { children: `· ${providerLabel(selectedPack.provider)} (${selectedPack.voice_name || 'Bound Voice'})` })
+                          ]
+                        })
+                        : jsx('span', { className: 'text-[11px] text-muted-foreground', children: 'No saved pack selected (select one or create in Builder)' }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'outline',
+                        onClick: () => setActiveTab('builder'),
+                        className: 'text-xs h-7 gap-1',
+                        children: [
+                          jsx('span', { children: '🛠️' }),
+                          jsx('span', { children: 'Edit in Builder →' })
+                        ]
+                      })
+                    ]
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-primary/30 rounded-lg space-y-2 bg-primary/5',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Character strength' }),
+                  jsxs('label', {
+                    className: 'text-xs font-medium flex justify-between',
+                    children: [
+                      'Character strength (LLM) — 0% = profile soul only, 100% = character replaces soul for this session',
+                      `${characterStrengthLabel(characterStrength)} (${characterStrength}%)`
+                    ]
+                  }),
+                  jsx('input', {
+                    type: 'range',
+                    min: '0',
+                    max: '100',
+                    step: '1',
+                    value: characterStrength,
+                    onChange: (e) => setCharacterStrength(e.target.value),
+                    className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1',
+                    'aria-label': 'Character strength'
+                  }),
+                  jsx('p', {
+                    className: 'text-[10px] text-muted-foreground',
+                    children: '0% = no style overlay (soul only). Soft 1–40 / Medium 41–70 / Heavy 71–99 blend character vs SOUL. 100% = character eclipses SOUL for this session. This is not TTS Temperature.'
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-primary/50 rounded-lg space-y-2 bg-primary/10',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Apply' }),
+                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Primary action: overlay this persona + voice on the focused profile’s current chat. Save pack and preview are secondary.' }),
+                  jsx(Button, {
+                    size: 'sm',
+                    onClick: handleApplyToChat,
+                    disabled: isApplying,
+                    className: 'w-full h-10 text-sm font-semibold bg-primary text-primary-foreground',
+                    children: isApplying ? 'Applying…' : 'Apply to this chat'
+                  }),
+                  jsxs('div', {
+                    className: 'flex flex-wrap gap-2',
+                    children: [
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'outline',
+                        onClick: handleAudition,
+                        disabled: isAuditioning || !selectedVoice,
+                        className: 'text-xs h-8',
+                        children: isAuditioning ? 'Generating preview…' : 'Preview voice'
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'outline',
+                        onClick: handleSavePersona,
+                        className: 'text-xs h-8',
+                        children: editingPackId ? 'Save pack' : 'Save as new pack'
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'ghost',
+                        onClick: handleResetStock,
+                        className: 'text-xs h-8 text-muted-foreground',
+                        children: 'Reset to stock Hermes'
+                      })
+                    ]
+                  }),
+                  (selectedPack || selectedVoiceRecord)
+                    ? jsx('p', {
+                      className: 'text-[10px] text-muted-foreground',
+                      children: `Will apply ${name || (selectedPack && selectedPack.name) || 'this pack'} · ${providerLabel(provider)}${selectedVoiceRecord ? ` (${selectedVoiceRecord.name})` : ''} at ${characterStrength}%`
+                    })
+                    : null
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-border/70 rounded-lg space-y-1 bg-muted/10',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Current applied state' }),
+                  jsx('p', { className: 'text-xs font-medium text-foreground', children: liveCopy.headline }),
+                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: liveCopy.detail }),
+                  statusMessage && jsx('div', {
+                    className: 'text-xs px-2.5 py-1.5 rounded bg-muted/60 text-muted-foreground border border-border/50 mt-1',
+                    children: statusMessage
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 bg-muted/10 border border-border/50 rounded space-y-2',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-muted-foreground', children: 'Group-chat voice bind' }),
+                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Assigns TTS keys for @mentions in group chats. This is not the session Apply button above.' }),
+                  jsxs('div', {
+                    className: 'flex items-center justify-between',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium text-foreground', children: 'Hermes bot / profile' }),
+                      botProfiles.length > 0 && selectedBotProfile && jsx('span', {
+                        className: 'text-[11px] text-muted-foreground',
+                        children: `Current TTS: ${(botProfiles.find(b => b.id === selectedBotProfile)?.voice) || 'none'}`
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'flex gap-2 items-center',
+                    children: [
+                      jsx('select', {
+                        value: selectedBotProfile,
+                        onChange: (e) => setSelectedBotProfile(e.target.value),
+                        className: 'flex-1 h-8 rounded border border-border bg-background px-2 text-xs text-foreground',
+                        children: botProfiles.length === 0
+                          ? jsx('option', { value: '', children: 'No profiles detected' })
+                          : botProfiles.map(b =>
+                              jsx('option', {
+                                key: b.id,
+                                value: b.id,
+                                children: `${b.title} (${b.id}) [TTS: ${b.provider || 'none'}]`
+                              })
+                            )
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'outline',
+                        onClick: handleAssignVoiceToBot,
+                        disabled: isAssigning || !selectedVoice || !selectedBotProfile,
+                        className: 'text-xs h-8 px-3 shrink-0',
+                        children: isAssigning ? 'Assigning…' : 'Assign voice to bot'
+                      })
+                    ]
+                  })
+                ]
+              })
+            ]
+            : [
+              // ── Tab 2: Voice Builder & Creation ──
+              jsxs('div', {
+                className: 'p-3 border border-border/50 rounded-lg bg-card/40 space-y-3',
+                children: [
+                  jsxs('div', {
+                    className: 'flex items-center justify-between border-b border-border/40 pb-1.5',
+                    children: [
+                      jsx('div', { className: 'text-xs font-bold text-foreground', children: `🎙️ Clone a new voice — ${provider === 'fish_audio' ? 'Fish Audio (cloud)' : 'Voicebox (local GPU)'}` }),
+                      jsx('span', { className: 'text-[10px] text-muted-foreground', children: 'WAV, MP3, or M4A' })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Voice provider for cloning' }),
+                      jsxs('div', {
+                        className: 'flex gap-2 p-1 bg-muted/30 rounded border border-border/40',
+                        children: [
+                          jsx(Button, {
+                            size: 'sm',
+                            variant: provider === 'fish_audio' ? 'default' : 'ghost',
+                            className: 'flex-1 text-xs h-8',
+                            onClick: () => setProvider('fish_audio'),
+                            children: 'Fish Audio (cloud)'
+                          }),
+                          jsx(Button, {
+                            size: 'sm',
+                            variant: provider === 'voicebox' ? 'default' : 'ghost',
+                            className: 'flex-1 text-xs h-8',
+                            onClick: () => setProvider('voicebox'),
+                            children: 'Voicebox (local GPU)'
+                          })
+                        ]
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'grid grid-cols-2 gap-2',
+                    children: [
+                      jsxs('div', {
+                        className: 'space-y-1',
+                        children: [
+                          jsx('label', { className: 'text-[11px] font-medium text-foreground', children: 'New cloned voice name' }),
+                          jsx(Input, {
+                            value: cloneName,
+                            onChange: (e) => setCloneName(e.target.value),
+                            placeholder: 'e.g. Chuck Voice',
+                            className: 'text-xs h-8'
+                          })
+                        ]
+                      }),
+                      jsxs('div', {
+                        className: 'space-y-1',
+                        children: [
+                          jsx('label', { className: 'text-[11px] font-medium text-foreground', children: 'Target engine / model' }),
+                          jsx('select', {
+                            value: selectedModel,
+                            onChange: (e) => setSelectedModel(e.target.value),
+                            className: 'w-full h-8 rounded-md border border-input bg-background px-2 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
+                            children: models.map(m =>
+                              jsx('option', { key: m.id, value: m.id, children: `${m.name}${m.recommended ? ' ★ (Recommended)' : ''}` })
+                            )
+                          })
+                        ]
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-[11px] font-medium text-foreground', children: 'Reference audio sample' }),
+                      jsx('input', {
+                        type: 'file',
+                        accept: 'audio/*',
+                        onChange: (e) => setCloneFile(e.target.files[0]),
+                        className: 'w-full text-xs text-muted-foreground file:mr-2 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-muted file:text-foreground hover:file:opacity-90'
+                      })
+                    ]
+                  }),
+                  jsx(Button, {
+                    size: 'sm',
+                    variant: 'default',
+                    onClick: handleCloneUpload,
+                    disabled: isCloning || !cloneFile || !cloneName,
+                    className: 'text-xs h-8 w-full mt-1',
+                    children: isCloning ? `Cloning on ${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'}…` : `Upload & clone to ${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'}`
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-border/70 rounded-lg space-y-2 bg-muted/10',
+                children: [
+                  jsxs('div', {
+                    className: 'flex items-center justify-between',
+                    children: [
+                      jsx('div', { className: 'text-xs font-bold text-foreground', children: `Voice Library & Clones (${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'})` }),
+                      jsx('span', { className: 'text-[10px] text-muted-foreground font-normal', children: `${voices.filter(v => v.voice_type === 'cloned').length} clones available` })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'flex gap-2 items-center',
+                    children: [
+                      jsx('select', {
+                        value: selectedVoice,
+                        onChange: (e) => setSelectedVoice(e.target.value),
+                        className: 'flex-1 h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm focus:outline-none focus:ring-1 focus:ring-ring font-medium',
+                        children: voices.map(v =>
+                          jsx('option', { key: v.id, value: v.id, children: `${v.voice_type === 'cloned' ? 'Clone' : 'Preset'} · ${v.name} · ${providerLabel(v.provider)}` })
+                        )
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'outline',
+                        onClick: () => loadData(provider),
+                        className: 'h-9 text-xs',
+                        title: 'Refresh voice list from the selected provider',
+                        children: 'Refresh'
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: showManager ? 'default' : 'outline',
+                        onClick: () => setShowManager(!showManager),
+                        className: 'h-9 text-xs',
+                        title: 'Manage, delete, or re-sample voices',
+                        children: showManager ? 'Close manager' : 'Manage voices'
+                      })
+                    ]
+                  }),
+                  showManager && jsxs('div', {
+                    className: 'p-3 border border-border/80 rounded-lg bg-muted/20 space-y-2.5 mt-2',
+                    children: [
+                      jsxs('div', {
+                        className: 'flex items-center justify-between border-b border-border/40 pb-1.5',
+                        children: [
+                          jsx('span', { className: 'text-xs font-bold text-foreground', children: `Manage cloned voices on ${provider === 'fish_audio' ? 'Fish Audio' : 'Voicebox'}` }),
+                          jsx(Input, {
+                            value: filterQuery,
+                            onChange: (e) => setFilterQuery(e.target.value),
+                            placeholder: 'Filter by name…',
+                            className: 'h-7 w-44 text-[11px]'
+                          })
+                        ]
+                      }),
+                      jsxs('div', {
+                        className: 'max-h-52 overflow-y-auto space-y-1.5 pr-1',
+                        children: voices.filter(v => v.voice_type === 'cloned' && (!filterQuery || v.name.toLowerCase().includes(filterQuery.toLowerCase()))).length === 0
+                          ? jsx('div', { className: 'text-center py-3 text-xs text-muted-foreground', children: 'No cloned voices match filter.' })
+                          : voices
+                              .filter(v => v.voice_type === 'cloned' && (!filterQuery || v.name.toLowerCase().includes(filterQuery.toLowerCase())))
+                              .map(v =>
+                                jsxs('div', {
+                                  key: v.id,
+                                  className: 'flex items-center justify-between p-2 rounded bg-background border border-border/60 text-xs shadow-sm',
+                                  children: [
+                                    jsxs('div', {
+                                      className: 'flex flex-col overflow-hidden mr-2',
+                                      children: [
+                                        jsx('span', { className: 'font-semibold truncate text-foreground', children: v.name }),
+                                        jsx('span', { className: 'text-[10px] text-muted-foreground truncate font-mono', children: `ID: ${v.id.substring(0, 16)}...` })
+                                      ]
+                                    }),
+                                    jsxs('div', {
+                                      className: 'flex items-center gap-1.5 shrink-0',
+                                      children: [
+                                        jsx('label', {
+                                          className: 'cursor-pointer px-2 py-1 bg-muted hover:bg-muted/80 rounded text-[11px] font-medium border border-border/60 transition-colors',
+                                          title: 'Upload a newer reference sample for this voice',
+                                          children: [
+                                            'Re-sample',
+                                            jsx('input', {
+                                              type: 'file',
+                                              accept: 'audio/*',
+                                              className: 'hidden',
+                                              onChange: (e) => {
+                                                if (e.target.files && e.target.files[0]) {
+                                                  handleResampleVoice(v.id, v.name, e.target.files[0]);
+                                                }
+                                              }
+                                            })
+                                          ]
+                                        }),
+                                        jsx(Button, {
+                                          size: 'sm',
+                                          variant: 'destructive',
+                                          className: 'h-6 px-2 text-[11px]',
+                                          onClick: () => handleDeleteVoice(v.id, v.name),
+                                          disabled: isManagingVoice,
+                                          title: 'Delete this cloned voice',
+                                          children: 'Delete'
+                                        })
+                                      ]
+                                    })
+                                  ]
+                                })
+                              )
+                      })
+                    ]
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-border/60 rounded-lg space-y-3 bg-card/40',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: '🎭 Persona Pack Definition' }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Select Pack to Edit or Create New' }),
+                      jsx('select', {
+                        value: editingPackId || '__new__',
+                        onChange: (e) => {
+                          const id = e.target.value;
+                          if (!id || id === '__new__') applyPackToForm(null);
+                          else applyPackToForm(studioPacks.find((p) => p.id === id) || null);
+                        },
+                        className: 'w-full h-8 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
+                        children: [
+                          jsx('option', { value: '__new__', children: '✨ Create brand new persona pack' }),
+                          ...(studioPacks || []).map((p) =>
+                            jsx('option', {
+                              key: p.id,
+                              value: p.id,
+                              children: `Edit: ${p.avatar || '🎭'} ${p.name}`
+                            })
+                          )
+                        ]
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'grid grid-cols-4 gap-2',
+                    children: [
+                      jsxs('div', {
+                        className: 'col-span-1',
+                        children: [
+                          jsx('label', { className: 'text-xs font-medium', children: 'Avatar' }),
+                          jsx(Input, {
+                            value: avatar,
+                            onChange: (e) => setAvatar(e.target.value),
+                            className: 'text-xs h-8 text-center'
+                          })
+                        ]
+                      }),
+                      jsxs('div', {
+                        className: 'col-span-3',
+                        children: [
+                          jsx('label', { className: 'text-xs font-medium', children: 'Persona name' }),
+                          jsx(Input, {
+                            value: name,
+                            onChange: (e) => setName(e.target.value),
+                            placeholder: editingPackId ? 'Pack name' : 'e.g. Jarvis Butler, Storyteller',
+                            className: 'text-xs h-8'
+                          })
+                        ]
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Speaking style / system prompt' }),
+                      jsx(Textarea, {
+                        value: systemPrompt,
+                        onChange: (e) => setSystemPrompt(e.target.value),
+                        placeholder: 'Define how this assistant speaks, vocabulary rules, mannerisms...',
+                        className: 'text-xs min-h-[75px]'
+                      })
+                    ]
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-border/60 rounded-lg space-y-3 bg-card/40',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: '🔊 Voice Tuning & Live Audition' }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Synthesis engine (saved with pack)' }),
+                      jsx('select', {
+                        value: selectedModel,
+                        onChange: (e) => setSelectedModel(e.target.value),
+                        className: 'w-full h-8 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm font-medium focus:outline-none focus:ring-1 focus:ring-ring',
+                        children: models.map(m =>
+                          jsx('option', { key: m.id, value: m.id, children: `${m.name}${m.recommended ? ' ★ (Recommended)' : ''}` })
+                        )
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'grid grid-cols-2 gap-4',
+                    children: [
+                      jsxs('div', {
+                        children: [
+                          jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Speed (TTS)', `${speed}x`] }),
+                          jsx('input', {
+                            type: 'range',
+                            min: '0.7',
+                            max: '1.5',
+                            step: '0.05',
+                            value: speed,
+                            onChange: (e) => setSpeed(e.target.value),
+                            className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1',
+                            'aria-label': 'TTS speed'
+                          })
+                        ]
+                      }),
+                      jsxs('div', {
+                        children: [
+                          jsxs('label', { className: 'text-xs font-medium flex justify-between', children: ['Temperature / Expressiveness (TTS only)', `${temperature}`] }),
+                          jsx('input', {
+                            type: 'range',
+                            min: '0.1',
+                            max: '1.0',
+                            step: '0.05',
+                            value: temperature,
+                            onChange: (e) => setTemperature(e.target.value),
+                            className: 'w-full h-1 bg-border rounded-lg appearance-none cursor-pointer mt-1',
+                            'aria-label': 'TTS temperature'
+                          })
+                        ]
+                      })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'space-y-1',
+                    children: [
+                      jsx('label', { className: 'text-xs font-medium', children: 'Preview text' }),
+                      jsxs('div', {
+                        className: 'flex gap-2 items-center',
+                        children: [
+                          jsx(Input, {
+                            value: previewText,
+                            onChange: (e) => setPreviewText(e.target.value),
+                            placeholder: 'Text to speak…',
+                            className: 'text-xs h-8 flex-1'
+                          }),
+                          jsx(Button, {
+                            size: 'sm',
+                            variant: 'outline',
+                            onClick: handleAudition,
+                            disabled: isAuditioning || !selectedVoice,
+                            className: 'text-xs h-8 shrink-0',
+                            children: isAuditioning ? 'Generating…' : '🔊 Preview voice'
+                          })
+                        ]
+                      })
+                    ]
+                  })
+                ]
+              }),
+
+              jsxs('div', {
+                className: 'p-3 border border-primary/40 rounded-lg bg-primary/5 space-y-2',
+                children: [
+                  jsx('div', { className: 'text-xs font-bold text-foreground', children: 'Save & Proceed' }),
+                  jsx('p', { className: 'text-[10px] text-muted-foreground', children: 'Save your pack changes to disk. It will be immediately available in the Apply tab and titlebar.' }),
+                  jsxs('div', {
+                    className: 'flex gap-2 items-center',
+                    children: [
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'default',
+                        onClick: handleSavePersona,
+                        className: 'flex-1 text-xs h-9 font-semibold',
+                        children: editingPackId ? '💾 Save Pack Changes' : '💾 Save as New Pack'
+                      }),
+                      jsx(Button, {
+                        size: 'sm',
+                        variant: 'outline',
+                        onClick: () => setActiveTab('apply'),
+                        className: 'text-xs h-9',
+                        children: '🎯 Go to Apply →'
+                      })
+                    ]
+                  }),
+                  statusMessage && jsx('div', {
+                    className: 'text-xs px-2.5 py-1.5 rounded bg-muted/60 text-muted-foreground border border-border/50 mt-1',
+                    children: statusMessage
+                  })
+                ]
+              })
+            ]
         }),
 
         jsxs(DialogFooter, {

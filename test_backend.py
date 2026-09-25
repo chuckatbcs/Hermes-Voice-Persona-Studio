@@ -105,6 +105,33 @@ class TestPersonaStorage(IsolatedHermesHomeTest):
         self.assertIn('status_code=404, detail=f"Persona \'{persona_id}\' not found"', api_src)
         self.assertIn('"updated": True', api_src)
 
+
+    def test_storage_persists_engine_on_pack(self):
+        """Voice model (Synthesis engine) must survive Save → reload."""
+        storage = PersonaStorage(root_dir=str(self.home / "personas"))
+        storage.save_persona(
+            PersonaBundle(
+                id="amanda",
+                name="Amanda",
+                avatar="🎙️",
+                system_prompt="Warm supportive conversational manner while doing the job.",
+                provider="voicebox",
+                voice_id="33d87aca-4281-479a-a320-623633377589",
+                voice_name="Amanda",
+                character_strength=25,
+                engine="chatterbox_turbo",
+            )
+        )
+        loaded = storage.get_persona("amanda")
+        self.assertEqual(loaded.engine, "chatterbox_turbo")
+        raw = (self.home / "personas" / "amanda" / "manifest.json").read_text(encoding="utf-8")
+        self.assertIn("chatterbox_turbo", raw)
+        # Update engine in place (Save pack with new model)
+        loaded.engine = "chatterbox"
+        storage.save_persona(loaded)
+        again = storage.get_persona("amanda")
+        self.assertEqual(again.engine, "chatterbox")
+
     def test_storage_skips_dotfiles(self):
         root = self.home / "personas"
         storage = PersonaStorage(root_dir=str(root))
@@ -123,6 +150,18 @@ class TestProvidersOffline(unittest.TestCase):
     def test_voicebox_provider_name(self):
         provider = VoiceboxProvider()
         self.assertEqual(provider.name, "voicebox")
+
+    def test_voicebox_model_catalog_includes_luxtts_recommended(self):
+        from backend.api import list_clone_models
+
+        models = list_clone_models("voicebox")
+        by_id = {model["id"]: model for model in models}
+        for existing in ("luxtts", "qwen_fast", "qwen", "chatterbox_turbo", "chatterbox", "kokoro"):
+            self.assertIn(existing, by_id)
+        lux = by_id["luxtts"]
+        self.assertIn("LuxTTS", lux["name"])
+        self.assertTrue(lux["recommended"])
+        self.assertFalse(by_id["qwen_fast"]["recommended"])
 
 
 class TestPersonaSync(IsolatedHermesHomeTest):
@@ -1537,7 +1576,8 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               voice_id: 'c9da87b0-19be-49c4-ab44-01cb7943f5c4',
               speed: 1.05,
               temperature: 0.8,
-              character_strength: 25
+              character_strength: 25,
+              engine: 'chatterbox_turbo'
             };
             const hydrated = hydrateFormFromPack(pack);
             const unnamed = personaSaveRequest({
@@ -1551,7 +1591,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
               voiceName: 'Cartman',
               speed: 1.05,
               temperature: 0.8,
-              characterStrength: 100
+              characterStrength: 100,
+              engine: 'chatterbox',
+              selectedModel: 'chatterbox'
             });
             const created = personaSaveRequest({
               editingId: '',
@@ -1598,10 +1640,12 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["hydrated"]["name"], "Eric Cartman")
         self.assertEqual(data["hydrated"]["characterStrength"], 25)
         self.assertEqual(data["hydrated"]["selectedVoice"], "c9da87b0-19be-49c4-ab44-01cb7943f5c4")
+        self.assertEqual(data["hydrated"]["engine"], "chatterbox_turbo")
         self.assertEqual(data["unnamed"]["method"], "PUT")
         self.assertEqual(data["unnamed"]["url"], "/personas/cartman")
         self.assertEqual(data["unnamed"]["body"]["name"], "Eric Cartman")
         self.assertEqual(data["unnamed"]["body"]["character_strength"], 100)
+        self.assertEqual(data["unnamed"]["body"]["engine"], "chatterbox")
         self.assertEqual(data["created"]["method"], "POST")
         self.assertEqual(data["created"]["url"], "/personas")
         self.assertIn("error", data["missing"])

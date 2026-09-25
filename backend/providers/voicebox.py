@@ -85,12 +85,15 @@ class VoiceboxProvider(BaseTTSProvider):
                     engine = prof_data.get("default_engine") or prof_data.get("preset_engine")
             except Exception:
                 pass
+        if not engine:
+            engine = "luxtts"
 
         payload: Dict[str, Any] = {
             "profile_id": voice_id,
             "text": text,
             "language": kwargs.get("language", "en"),
         }
+
         model_size = kwargs.get("model_size")
         if engine == "qwen_fast":
             engine = "qwen"
@@ -158,7 +161,7 @@ class VoiceboxProvider(BaseTTSProvider):
         **kwargs: Any,
     ) -> VoiceInfo:
         # 1. Create profile
-        engine = kwargs.get("engine", "qwen")
+        engine = kwargs.get("engine") or "luxtts"
         if engine == "qwen_fast":
             engine = "qwen"
         p_data = {
@@ -194,6 +197,46 @@ class VoiceboxProvider(BaseTTSProvider):
             description=description,
             default_engine=p_data["default_engine"],
         )
+
+
+    def update_default_engine(self, voice_id: str, engine: str) -> bool:
+        """Persist synthesis engine on the Voicebox profile (PUT /profiles/{id}).
+
+        Runtime Hermes TTS reads profile ``default_engine``; Studio Save must
+        update it or the UI model choice is audition-only.
+        """
+        if not voice_id or voice_id == "default" or not engine:
+            return False
+        stored = engine
+        if stored == "qwen_fast":
+            # Match clone_voice: Voicebox stores qwen + model_size for the fast path.
+            stored = "qwen"
+        try:
+            resp = requests.put(
+                f"{self._base_url}/profiles/{voice_id}",
+                json={"default_engine": stored, "preset_engine": stored},
+                timeout=5,
+            )
+            if resp.status_code in (200, 204):
+                return True
+            # Some builds require name; merge with existing profile.
+            if resp.status_code in (400, 422):
+                prof = requests.get(f"{self._base_url}/profiles/{voice_id}", timeout=2.0)
+                if prof.status_code == 200:
+                    body = dict(prof.json() or {})
+                    body["default_engine"] = stored
+                    body["preset_engine"] = stored
+                    resp2 = requests.put(
+                        f"{self._base_url}/profiles/{voice_id}",
+                        json=body,
+                        timeout=5,
+                    )
+                    return resp2.status_code in (200, 204)
+            print(f"[VoiceboxProvider] update_default_engine HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+        except Exception as e:
+            print(f"[VoiceboxProvider] update_default_engine warning: {e}")
+            return False
 
     def delete_voice(self, voice_id: str) -> bool:
         if not voice_id or voice_id == "default":
