@@ -7,9 +7,11 @@ otherwise PyYAML mutate-only + atomic replace). Studio never patches
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .config_io import get_dotted, load_yaml, update_config_keys
 from .managed_index import SOURCE_TAG, remember_writes
@@ -24,6 +26,10 @@ _PLACEHOLDER_VOICE_IDS = frozenset({"", "default", "none", "null", "undefined"})
 _VOICEBOX_UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+# Fish reference ids are 32 hex chars with no separator. Rejecting anything
+# else keeps labels and hand-typed placeholders (e.g. "kitt-id") out of the
+# cache so they can never be sent upstream and 400.
+_FISH_VOICE_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def is_placeholder_voice_id(value: Any) -> bool:
@@ -71,26 +77,22 @@ def resolve_profile_tts(cfg: Dict[str, Any]) -> Dict[str, Any]:
         match_voice = re.search(r"--fish-voice\s+([^\s]+)", cmd)
         if match_voice:
             voice_id = match_voice.group(1).strip()
-        # Fall back to clones dict
+        # Fall back to clones dict. This map lives in the user's config.yaml,
+        # so only obvious placeholders are rejected here — not a strict id
+        # format, which would silently break if Fish ever changes its shape.
         if not voice_id:
             clones = prov_cfg.get("clones") or {}
             if isinstance(clones, dict):
-                voice_id = clones.get(voice_label)
-        # Fall back to ~/.hermes/fish_voices.json
+                candidate = clones.get(voice_label)
+                if not is_placeholder_voice_id(candidate):
+                    voice_id = candidate
+        # Fall back to ~/.hermes/fish_voices.json, read through the canonical
+        # loader. This file is Studio-owned, so it IS held to the real Fish id
+        # format: legacy flat-string and nested-dict entries are normalized, and
+        # hand-typed placeholders ("kitt-id") are dropped rather than sent
+        # upstream to 400.
         if not voice_id:
-            cache_p = fish_voices_cache_path()
-            if cache_p.exists():
-                try:
-                    data = json.loads(cache_p.read_text(encoding="utf-8")) or {}
-                    if isinstance(data, dict):
-                        val = data.get(voice_label)
-                        if isinstance(val, dict):
-                            voice_id = val.get("voice_id") or val.get("id")
-                            voice_name = val.get("title") or val.get("name") or voice_name
-                        elif isinstance(val, str):
-                            voice_id = val
-                except Exception:
-                    pass
+            voice_id = load_cached_fish_voices().get(voice_label)
 
     return {
         "provider": prov_key,
@@ -184,34 +186,278 @@ def _pin_fish_command(cmd: Any, voice_id: str, label: str) -> str:
     return _upsert_cli_flag(text, "--fish-voice", voice_id)
 
 
-def save_cached_voice(label: str, voice_id: str, voice_name: str = "") -> Path:
-    """Sync ~/.hermes/fish_voices.json so --fish-label resolves the bound id."""
+def _coerce_cached_voice_id(value: Any) -> Optional[str]:
+    """Canonical voice id from any historical cache shape.
+
+    Studio used to write flat strings *and* nested dicts into the same
+    ``fish_voices.json``, so readers had to branch on three shapes. Fish
+    ``default`` clones additionally hold non-hex placeholder ids like
+    ``kitt-id`` which 400 the API. Normalize to one shape and reject
+    placeholders so a stale label can never be sent upstream.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, dict):
+        for key in ("voice_id", "id"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                text = raw.strip()
+                break
+        else:
+            return None
+    else:
+        return None
+    if not text or text.lower() in _PLACEHOLDER_VOICE_IDS:
+        return None
+    # Fish reference ids are 32 hex chars. Anything else is a label or a
+    # placeholder that was pasted in by mistake (e.g. "kitt-id").
+    if not _FISH_VOICE_ID.match(text):
+        return None
+    return text
+
+
+def repair_cached_fish_voices(
+    voices: Optional[Iterable[Any]] = None,
+) -> Dict[str, Any]:
+    """Replace placeholder cache ids with the real clone id, when one exists.
+
+    ``hermes_kitt`` was cached as the literal string ``"kitt-id"`` — a
+    placeholder, not a Fish reference id. Migration alone would DROP that
+    label, silently losing a working clone, so try to rebind it first against
+    the live provider catalog by name.
+
+    Returns ``{repaired: {label: id}, dropped: [label]}``. A placeholder with
+    no live twin stays in ``dropped`` — an unrepairable label must not keep
+    pointing at an id that will 400.
+    """
+    catalog = list(voices) if voices is not None else []
+    path = fish_voices_cache_path()
+    report: Dict[str, Any] = {"ok": True, "repaired": {}, "dropped": []}
+    if not path.exists() or not catalog:
+        return report
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return report
+    if not isinstance(raw, dict):
+        return report
+
+    by_name: Dict[str, str] = {}
+    for info in catalog:
+        vid = _coerce_cached_voice_id(getattr(info, "id", None))
+        name = str(getattr(info, "name", "") or "")
+        if vid and name:
+            by_name.setdefault(_clean_key(name), vid)
+
+    for label in list(raw.keys()):
+        if label == "voices":
+            continue
+        if _coerce_cached_voice_id(raw[label]) is not None:
+            continue  # already a real id
+        candidate = (
+            by_name.get(_clean_key(label))
+            or by_name.get(_clean_key(str(label).replace("hermes_", "", 1)))
+        )
+        if candidate:
+            prior = raw[label] if isinstance(raw[label], dict) else {}
+            raw[label] = {**prior, "voice_id": candidate}
+            report["repaired"][label] = candidate
+        else:
+            report["dropped"].append(str(label))
+    if not report["repaired"]:
+        return report
+
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".fish_voices_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(raw, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return report
+
+
+def preview_cached_fish_drops() -> List[str]:
+    """Labels the canonical migration would drop, without writing anything.
+
+    A dropped label had a placeholder id (e.g. the literal ``kitt-id``), so
+    leaving it in place means TTS sends a value Fish will 400 on.
+    """
+    path = fish_voices_cache_path()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    dropped: List[str] = []
+    sources = ([raw.get("voices")] if isinstance(raw.get("voices"), dict) else []) + [
+        {k: v for k, v in raw.items() if k != "voices"}
+    ]
+    for source in sources:
+        for label, value in (source or {}).items():
+            if label and _coerce_cached_voice_id(value) is None and label not in dropped:
+                dropped.append(str(label))
+    return sorted(dropped)
+
+
+def migrate_cached_fish_voices(*, cache_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Rewrite the Fish label cache into the one canonical shape.
+
+    Repairs the three-shapes-at-once file in place: flat-string values become
+    ``{voice_id: ...}``, the legacy nested ``voices`` map is folded up, and any
+    label whose value is a placeholder (e.g. the literal ``kitt-id``) is
+    dropped rather than left to 400 Fish on the next TTS call. Existing
+    metadata (``title``, ``source``) is preserved.
+
+    Returns the before/after label counts and what was removed.
+    """
+    path = cache_path or fish_voices_cache_path()
+    report: Dict[str, Any] = {
+        "ok": True,
+        "path": str(path),
+        "changed": False,
+        "before": 0,
+        "after": 0,
+        "dropped": [],
+        "retyped": [],
+    }
+    if not path.exists():
+        return report
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return report
+    if not isinstance(raw, dict):
+        return report
+
+    report["before"] = len([k for k in raw if k != "voices"])
+    canonical: Dict[str, Any] = {}
+    nested = raw.get("voices")
+    sources = ([nested] if isinstance(nested, dict) else []) + [
+        {k: v for k, v in raw.items() if k != "voices"}
+    ]
+    for source in sources:
+        for label, value in (source or {}).items():
+            if not label:
+                continue
+            vid = _coerce_cached_voice_id(value)
+            if vid is None:
+                if label not in report["dropped"]:
+                    report["dropped"].append(str(label))
+                continue
+            if isinstance(value, str) and str(label) not in report["retyped"]:
+                report["retyped"].append(str(label))
+            # Top-level (later) sources win; metadata is merged, not clobbered.
+            existing = canonical.get(label)
+            prior: Dict[str, Any] = existing if isinstance(existing, dict) else {}
+            canonical[label] = {**prior, "voice_id": vid}
+
+    report["after"] = len(canonical)
+    if canonical == raw:
+        return report
+
+    report["changed"] = True
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".fish_voices_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(canonical, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return report
+
+
+def load_cached_fish_voices() -> Dict[str, str]:
+    """Read the Fish label cache into one canonical ``{label: voice_id}`` map."""
+    path = fish_voices_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, str] = {}
+    # A nested "voices" map is a legacy Studio shape; fold it in first so the
+    # top-level (canonical) entries win on conflict.
+    nested = data.get("voices")
+    if isinstance(nested, dict):
+        for label, raw in nested.items():
+            vid = _coerce_cached_voice_id(raw)
+            if label and vid:
+                out[str(label)] = vid
+    for label, raw in data.items():
+        if label == "voices":
+            continue
+        vid = _coerce_cached_voice_id(raw)
+        if label and vid:
+            out[str(label)] = vid
+    return out
+
+
+def save_cached_voice(label: str, voice_id: str, voice_name: str = "") -> Optional[Path]:
+    """Sync ~/.hermes/fish_voices.json so --fish-label resolves the bound id.
+
+    Writes ONE canonical shape (flat ``{label: {voice_id, ...}}`` matching
+    ``fish_tts.save_cached_voice``) as a single atomic full-file replace, so a
+    concurrent reader can never observe a half-written cache and a stale
+    label can never resurrect a deleted model.
+    """
+    clean_label = _clean_key(label)
+    vid = _coerce_cached_voice_id(voice_id)
+    path = fish_voices_cache_path()
+    if not clean_label or vid is None:
+        return None
+
+    # Delegate to fish_tts so we share its path resolution and shape, then
+    # rewrite the whole file canonically in one atomic replace.
     try:
         from fish_tts import save_cached_voice as _imported  # type: ignore
 
-        _imported(label, voice_id)
+        meta = {"title": voice_name} if voice_name else None
+        _imported(clean_label, vid, meta)
     except Exception:
-        pass
-    path = fish_voices_cache_path()
-    data: Any = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            data = {}
-    if not isinstance(data, dict):
-        data = {}
-    data[label] = voice_id
-    voices = data.get("voices")
-    if isinstance(voices, dict):
-        prev = voices.get(label)
-        if isinstance(prev, dict):
-            voices[label] = {**prev, "id": voice_id, "voice_id": voice_id, "name": voice_name or label}
-        else:
-            voices[label] = voice_id
-        data["voices"] = voices
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        store: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    store = existing
+            except Exception:
+                store = {}
+        store[clean_label] = {
+            "voice_id": vid,
+            **({"title": voice_name} if voice_name else {}),
+            "source": SOURCE_TAG,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".fish_voices_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(store, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
     return path
 
 

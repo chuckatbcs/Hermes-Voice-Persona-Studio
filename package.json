@@ -1,0 +1,16 @@
+{
+  "name": "hermes-personastudio",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Persona Studio: a Hermes Desktop plugin. desktop/lib/persona-helpers.mjs is the importable, unit-tested source; scripts/build-plugin.mjs inlines it into desktop/dist/plugin.js because the desktop runtime loader only allows @hermes/plugin-sdk and react* imports.",
+  "scripts": {
+    "test": "node --test tests/plugin.test.mjs",
+    "build": "node scripts/build-plugin.mjs",
+    "lint:imports": "node scripts/check-imports.mjs",
+    "check": "node scripts/build-plugin.mjs && node scripts/check-imports.mjs desktop/dist/plugin.js && node --test tests/plugin.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

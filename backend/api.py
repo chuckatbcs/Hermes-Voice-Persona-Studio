@@ -13,6 +13,7 @@ from .storage import PersonaBundle, PersonaStorage
 from . import bot_profiles
 from . import persona_sync
 from . import session_overlay
+from . import audit
 from .config_io import get_dotted, load_yaml
 from .paths import config_path_for_profile
 
@@ -312,6 +313,80 @@ async def clone_voice(
             "voice": vinfo.to_dict(),
             "persona": persona.to_dict() if persona else None,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/maintenance/migrate")
+def maintenance_migrate(apply: bool = False) -> Dict[str, Any]:
+    """Dry-run (default) the Fish cache canonicalization + overlay id repair.
+
+    Nothing is written unless ``apply=true``. Always run the dry run first and
+    read ``dropped`` — a dropped label is a clone whose cached id was a
+    placeholder, so re-assign it in Studio rather than letting TTS 400.
+    """
+    try:
+        if apply:
+            # Repair placeholders from the live catalog FIRST, so a working
+            # clone cached under a fake id is rebound rather than dropped.
+            voices = persona_sync.collect_provider_voices(PROVIDERS)
+            repair = bot_profiles.repair_cached_fish_voices(voices)
+            cache: Dict[str, Any] = bot_profiles.migrate_cached_fish_voices()
+            cache["repair"] = repair
+        else:
+            cache = {
+                "ok": True,
+                "changed": False,
+                "dry_run": True,
+                "would_drop": bot_profiles.preview_cached_fish_drops(),
+            }
+        overlay: Dict[str, Any] = {"ok": True, "dry_run": not apply}
+        if apply:
+            overlay = session_overlay.reconcile_session_state(
+                [b.id for b in storage.list_personas()]
+            )
+            overlay["style_heal"] = session_overlay.heal_stored_style_overlays()
+        return {"ok": True, "applied": apply, "fish_cache": cache, "session_state": overlay}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/session/reap-stale")
+def reap_stale_overlays(max_age_hours: float = 24.0) -> Dict[str, Any]:
+    """Restore overlays applied longer ago than *max_age_hours*.
+
+    There is no true session-scoped Hermes API: apply writes profile
+    ``config.yaml`` and relies on the plugin remounting to restore stock. An
+    overlay whose session is long gone would otherwise persist forever. This
+    reaps by age only — it never touches a young overlay.
+    """
+    try:
+        return session_overlay.reap_stale_session_overlays(max_age_hours=max_age_hours)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/personas/audit")
+def audit_persona_packs(repair: bool = False) -> Dict[str, Any]:
+    """Report pack/voice/overlay drift. ``repair=true`` fixes id drift only.
+
+    Read-only by default: a drifted ``applied_persona`` is reported, never
+    rewritten, unless the caller explicitly asks for the repair.
+    """
+    try:
+        bundles = storage.list_personas()
+        voices = persona_sync.collect_provider_voices(PROVIDERS)
+        known_ids = [b.id for b in bundles]
+        repaired: Dict[str, Any] = {}
+        if repair:
+            repaired = session_overlay.reconcile_session_state(known_ids)
+        state = session_overlay.load_session_state()
+        if repaired:
+            # Re-read so the findings reflect the repair we just made.
+            state = session_overlay.load_session_state()
+        report = audit.audit_personas(bundles, voices, session_state=state)
+        report["repaired"] = repaired
+        return report
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

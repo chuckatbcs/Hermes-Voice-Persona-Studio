@@ -125,6 +125,14 @@ _IDENTITY_PREFIX = re.compile(
     re.IGNORECASE,
 )
 
+# A prompt is *already* mannerism-shaped once it opens with "mannerisms of X:"
+# or "speaking voice of X:". Re-prefixing those produced the stutter
+# "mannerisms of Eric Cartman: mannerisms of Eric Cartman. Speak with ...".
+_MANNERISM_SHAPED = re.compile(
+    r"^\s*(?:mannerisms|speaking voice|speaking style|tone|voice|style)\s+of\b",
+    re.IGNORECASE,
+)
+
 
 def _drop_leading_name(rest: str, persona_name: str) -> str:
     label = (persona_name or "").strip()
@@ -141,10 +149,49 @@ def _drop_leading_name(rest: str, persona_name: str) -> str:
     return cleaned
 
 
+def _dedupe_mannerism_label(text: str, persona_name: str) -> str:
+    """Collapse a repeated ``mannerisms of X. mannerisms of X.`` stutter.
+
+    Existing overlays written before the mannerism-shaped guard accumulated a
+    duplicated prefix ("mannerisms of Eric Cartman: mannerisms of Eric
+    Cartman. Speak with ..."). Keep exactly ONE label clause and drop the
+    rest, so a re-apply heals the prompt instead of compounding it — and never
+    strip the attribution itself, which would lose who the mannerisms belong
+    to.
+    """
+    label = (persona_name or "").strip()
+    if not label:
+        return text.strip()
+    escaped = re.escape(label)
+    lead = re.compile(
+        rf"^\s*(?:mannerisms|speaking voice|speaking style|tone|voice|style)\s+of\s+{escaped}\s*[:.—-]?\s*",
+        re.IGNORECASE,
+    )
+    out = text.strip()
+    seen = 0
+    # Bounded loop: a well-formed prompt has exactly one clause and exits
+    # immediately; a pathological one cannot spin here.
+    for _ in range(8):
+        stripped = lead.sub("", out, count=1)
+        if stripped == out:
+            break
+        out = stripped.strip()
+        seen += 1
+    if seen == 0:
+        return out or text.strip()
+    remainder = out.strip()
+    canonical = f"mannerisms of {label}: "
+    if not remainder:
+        # Nothing but repeated labels — keep one bare clause.
+        return f"mannerisms of {label}"
+    return canonical + remainder
+
+
 def mannerism_from_prompt(raw: Optional[str], persona_name: str) -> str:
     """Rewrite bundle prompt.md into mannerism instructions, not identity.
 
     Leading ``You are X…`` / ``I am X…`` claims become ``mannerisms of {name}``.
+    A prompt that is already mannerism-shaped is passed through unchanged.
     """
     label = (persona_name or "this persona").strip() or "this persona"
     text = (raw or "").strip()
@@ -152,6 +199,10 @@ def mannerism_from_prompt(raw: Optional[str], persona_name: str) -> str:
         return (
             f"distinctive tone, vocabulary, and cadence associated with {label}"
         )
+
+    # Already mannerism-shaped: never re-prefix, just heal a stutter.
+    if _MANNERISM_SHAPED.match(text) and not _IDENTITY_SENTENCE.match(text):
+        return _dedupe_mannerism_label(text, label)
 
     parts = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)
     first = parts[0].strip()
@@ -244,16 +295,35 @@ def overlay_strength_percent(text: Optional[str]) -> Optional[int]:
 def _inner_style_from_overlay(text: str, persona_name: str) -> str:
     label = (persona_name or "this persona").strip() or "this persona"
     escaped = re.escape(label)
-    match = re.search(
+    # Each wrapper variant has its own inner-style lead-in. Missing the
+    # character-heavy form ("Speak as X first: …") made this return the WHOLE
+    # wrapper, which then got wrapped again on re-apply — nesting the overlay
+    # inside itself and duplicating the whole block.
+    leads = (
         rf"(?:mannerisms|speaking voice|quirks|style, phrasing, attitude, and quirks|"
         rf"phrasing, attitude, vocabulary, and quirks) of {escaped}:\s*(.+?)(?:\n|$)",
-        text,
-        flags=re.IGNORECASE,
+        rf"of {escaped}:\s*(.+?)(?:\n|$)",
+        rf"Speak as {escaped} first:\s*(.+?)(?:\n|$)",
     )
-    if not match:
-        match = re.search(rf"of {escaped}:\s*(.+?)(?:\n|$)", text, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
+    for pattern in leads:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            style = match.group(1).strip()
+            if style and not is_style_overlay_prompt(style):
+                return style
+    # Fall back to stripping the wrapper markers by hand rather than handing
+    # back text that still contains a full wrapper.
+    stripped = text
+    for marker in (
+        STYLE_OVERLAY_MARKER,
+        CHARACTER_ECLIPSE_MARKER,
+    ):
+        stripped = re.sub(rf"{re.escape(marker)}.*?%\)", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(rf"^\s*Speak as {escaped} first:\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(rf"^\s*(?:mannerisms|speaking voice)\s+of\s+{escaped}:\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = stripped.strip()
+    if stripped and not is_style_overlay_prompt(stripped) and not is_eclipse_prompt(stripped):
+        return stripped
     return mannerism_from_prompt(text, label)
 
 
@@ -342,7 +412,15 @@ def build_style_overlay_prompt(
     raw = (style_source or "").strip()
     existing = overlay_strength_percent(raw)
     if existing is not None and existing == percent and raw:
-        return raw
+        # Same strength, but the stored text may still carry a duplicated
+        # "mannerisms of X." clause from before the mannerism-shaped guard.
+        # Round-trip it through the wrapper so a heal actually happens
+        # instead of short-circuiting on "strength already matches".
+        if not is_style_overlay_prompt(raw):
+            return raw
+        style = _inner_style_from_overlay(raw, label)
+        rebuilt = _wrap_style_overlay(label, style, percent)
+        return rebuilt if rebuilt != raw else raw
     if percent >= 100:
         return _wrap_eclipse(label, identity_from_prompt(raw, label))
     if is_style_overlay_prompt(raw) or is_eclipse_prompt(raw):

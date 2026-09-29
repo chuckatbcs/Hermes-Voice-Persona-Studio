@@ -14,6 +14,8 @@ from backend import bot_profiles
 from backend import persona_sync
 from backend import config_io
 from backend import managed_index
+from backend import pack_ids
+from backend import audit
 import install as install_mod
 
 
@@ -759,7 +761,11 @@ class TestSurgicalConfigWrites(IsolatedHermesHomeTest):
         self.assertEqual(data["tts"]["providers"]["fish"]["clones"]["vincent_price"], live)
         self.assertEqual(data["tts"]["providers"]["fish"]["voice"], "vincent_price")
         cache = json.loads((self.home / "fish_voices.json").read_text(encoding="utf-8"))
-        self.assertEqual(cache["vincent_price"], live)
+        # One canonical dict shape, matching fish_tts.save_cached_voice. The
+        # old writer also stored a bare string, which made every reader branch
+        # on value type.
+        self.assertEqual(cache["vincent_price"]["voice_id"], live)
+        self.assertNotIn("voices", cache)
 
     def test_update_config_keys_preserves_sibling_keys(self):
         cfg = self._write_config()
@@ -1341,6 +1347,25 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         end = cls.src.index("// SESSION_WATCH_END")
         cls.helpers = cls.src[start:end]
 
+    @staticmethod
+    def _helper_module() -> str:
+        """desktop/lib/persona-helpers.mjs as plain functions, for node.
+
+        The pure helpers were extracted (O-7) so they are testable as behaviour
+        rather than as plugin.js source text. The desktop runtime imports the
+        real ESM file; these tests concatenate functions into one script, so
+        the ``export`` keyword is removed from export *declarations* only — a
+        bare line filter would leave an orphaned body and break on multi-line
+        ``export function`` blocks. tests/plugin.test.mjs imports the unmodified
+        module directly.
+        """
+        import re as _re
+
+        mod = (
+            Path(__file__).resolve().parent / "desktop" / "lib" / "persona-helpers.mjs"
+        ).read_text(encoding="utf-8")
+        return _re.sub(r"^export\s+(function|const|let|var|class)\s", r"\1 ", mod, flags=_re.M)
+
     def _run_js(self, body: str):
         import json
         import subprocess
@@ -1547,8 +1572,9 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["sel"], "persona:eric_cartman")
 
     def test_titlebar_lists_only_complete_packs(self):
-        helpers = self.src[self.src.index("function isGenericVoiceDescription") :]
-        helpers = helpers[: helpers.index("// TITLEBAR_PACK_END") + len("// TITLEBAR_PACK_END")]
+        # Pure pack helpers now live in desktop/lib/persona-helpers.mjs (O-7);
+        # load that real module instead of slicing plugin.js source text.
+        helpers = self._helper_module()
         data = self._run_js_helpers(
             helpers,
             """
@@ -1577,8 +1603,13 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertEqual(data["strength"], 80)
 
     def test_studio_hydrate_and_save_update_plan(self):
-        helpers = self.src[self.src.index("function isGenericVoiceDescription") :]
-        helpers = helpers[: helpers.index("// STUDIO_FORM_END") + len("// STUDIO_FORM_END")]
+        # The pure form helpers moved to desktop/lib/persona-helpers.mjs (O-7);
+        # load that real module instead of slicing plugin.js source text.
+        helpers = self._helper_module()
+        helpers += self.src[
+            self.src.index("// STUDIO_FORM_BEGIN") : self.src.index("// STUDIO_FORM_END")
+            + len("// STUDIO_FORM_END")
+        ]
         data = self._run_js_helpers(
             helpers,
             """
@@ -1674,10 +1705,15 @@ class TestPluginSessionWatchRace(unittest.TestCase):
         self.assertIn("100%", data["live"]["detail"])
 
     def test_live_session_personality_refresh_plan(self):
-        slug = self.src[self.src.index("function slugifyName") : self.src.index("function nameTokens")]
-        helpers = self.src[self.src.index("// LIVE_SESSION_REFRESH_BEGIN") : self.src.index("// LIVE_SESSION_REFRESH_END") + len("// LIVE_SESSION_REFRESH_END")]
+        helpers = self._helper_module()
+        helpers += self.src[
+            self.src.index("// LIVE_SESSION_REFRESH_BEGIN") : self.src.index(
+                "// LIVE_SESSION_REFRESH_END"
+            )
+            + len("// LIVE_SESSION_REFRESH_END")
+        ]
         data = self._run_js_helpers(
-            slug + "\n" + helpers,
+            helpers,
             """
             const routes = [
               { connectionId: 'conn-mechanic', mode: 'remote', profile: 'mechanic', targetProfile: 'mechanic' },
@@ -1817,6 +1853,43 @@ class TestInstallHygiene(IsolatedHermesHomeTest):
         self.assertFalse((dest / "plugin.py").exists())
         self.assertIn("export default", (dest / "plugin.js").read_text(encoding="utf-8"))
 
+    def test_deploy_ships_inlined_plugin_and_refuses_relative_import(self):
+        """The desktop loader allows only @hermes/plugin-sdk and react*.
+
+        Plugins are evaluated from a Blob URL, so a relative ./lib/ import
+        cannot resolve — the loader refuses it and the whole plugin fails to
+        load, silently taking the Personas/Studio titlebar controls with it.
+        So deploy must ship the INLINED desktop/dist/plugin.js, and must
+        REFUSE to ship a source plugin.js that still has a relative import.
+        """
+        src = Path(self.temp_dir) / "src"
+        (src / "desktop" / "lib").mkdir(parents=True)
+        (src / "desktop" / "plugin.js").write_text(
+            "import { x } from './lib/persona-helpers.mjs';\nexport default {};\n",
+            encoding="utf-8",
+        )
+        (src / "desktop" / "lib" / "persona-helpers.mjs").write_text(
+            "export const x = 1;\n", encoding="utf-8"
+        )
+        dest = Path(self.temp_dir) / "dest"
+
+        # No build artifact yet -> hard error, never a broken deploy.
+        with self.assertRaises(RuntimeError) as ctx:
+            install_mod.deploy_plugin(src, dest)
+        self.assertIn("scripts/build-plugin.mjs", str(ctx.exception))
+
+        # With the build present, the INLINED file is what ships.
+        dist = src / "desktop" / "dist"
+        dist.mkdir(parents=True)
+        (dist / "plugin.js").write_text(
+            "function x(){return 1}\nexport default {};\n", encoding="utf-8"
+        )
+        dest2 = Path(self.temp_dir) / "dest2"
+        install_mod.deploy_plugin(src, dest2)
+        shipped = (dest2 / "plugin.js").read_text(encoding="utf-8")
+        self.assertIn("function x()", shipped)
+        self.assertNotIn("from './lib/", shipped)
+
     def test_unit_is_ours_detects_marker(self):
         path = Path(self.temp_dir) / "hermes-personastudio.service"
         path.write_text(install_mod.SYSTEMD_MARKER + "\n[Service]\n", encoding="utf-8")
@@ -1849,6 +1922,387 @@ class TestSeedPresets(IsolatedHermesHomeTest):
         self.assertEqual(
             (jarvis_dir / "prompt.md").read_text(encoding="utf-8"),
             "Existing Jarvis mannerisms.\n",
+        )
+
+
+class TestFishCacheCanonicalShape(IsolatedHermesHomeTest):
+    """fish_voices.json held three value shapes at once; it holds one now."""
+
+    def _cache(self) -> dict:
+        return json.loads((self.home / "fish_voices.json").read_text(encoding="utf-8"))
+
+    def test_reader_normalizes_every_legacy_shape(self):
+        (self.home / "fish_voices.json").write_text(
+            json.dumps(
+                {
+                    "flat_string": "0e142644ca7143f887a40f18977b695e",
+                    "dict_voice_id": {"voice_id": "a3767161e96c4b7caa61b605bc6b015a"},
+                    "dict_id": {"id": "9c39172305b3441eb8add0f204dc8be8"},
+                    "placeholder": "kitt-id",
+                    "fish_default": "default",
+                    "voices": {
+                        "nested": {"voice_id": "c229169886234f17a42c21ff138ed3d0"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = bot_profiles.load_cached_fish_voices()
+        self.assertEqual(loaded["flat_string"], "0e142644ca7143f887a40f18977b695e")
+        self.assertEqual(loaded["dict_voice_id"], "a3767161e96c4b7caa61b605bc6b015a")
+        self.assertEqual(loaded["dict_id"], "9c39172305b3441eb8add0f204dc8be8")
+        self.assertEqual(loaded["nested"], "c229169886234f17a42c21ff138ed3d0")
+        # A hand-typed placeholder must never be trusted upstream.
+        self.assertNotIn("placeholder", loaded)
+        self.assertNotIn("fish_default", loaded)
+
+    def test_writer_refuses_placeholder_voice_id(self):
+        self.assertIsNone(
+            bot_profiles.save_cached_voice("hermes_kitt", "kitt-id", "Hermes kitt")
+        )
+        self.assertFalse((self.home / "fish_voices.json").exists())
+
+    def test_writer_emits_single_canonical_shape(self):
+        path = bot_profiles.save_cached_voice(
+            "Hermes eric_cartman", "0e142644ca7143f887a40f18977b695e", "Hermes eric_cartman"
+        )
+        self.assertIsNotNone(path)
+        data = self._cache()
+        self.assertNotIn("voices", data)
+        entry = data["hermes_eric_cartman"]
+        self.assertIsInstance(entry, dict)
+        self.assertEqual(entry["voice_id"], "0e142644ca7143f887a40f18977b695e")
+
+    def test_stale_placeholder_does_not_400_on_read(self):
+        """A deleted model cached as a label must not resolve to a bad id."""
+        (self.home / "config.yaml").write_text(
+            "tts:\n"
+            "  provider: fish\n"
+            "  providers:\n"
+            "    fish:\n"
+            "      voice: hermes_kitt\n",
+            encoding="utf-8",
+        )
+        (self.home / "fish_voices.json").write_text(
+            json.dumps({"hermes_kitt": {"voice_id": "kitt-id", "title": "Hermes kitt"}}),
+            encoding="utf-8",
+        )
+        resolved = bot_profiles.resolve_profile_tts(
+            yaml.safe_load((self.home / "config.yaml").read_text(encoding="utf-8"))
+        )
+        self.assertNotEqual(resolved["voice_id"], "kitt-id")
+
+    def test_migration_repairs_placeholder_from_live_catalog(self):
+        """A working clone must be rebound, not dropped, when a twin exists."""
+        (self.home / "fish_voices.json").write_text(
+            json.dumps({"hermes_kitt": {"voice_id": "kitt-id", "title": "Hermes kitt"}}),
+            encoding="utf-8",
+        )
+        report = bot_profiles.repair_cached_fish_voices(
+            [VoiceInfo(id="c229169886234f17a42c21ff138ed3d0",
+                       name="Hermes kitt", provider="fish_audio", voice_type="cloned")]
+        )
+        self.assertEqual(report["repaired"]["hermes_kitt"], "c229169886234f17a42c21ff138ed3d0")
+        self.assertEqual(report["dropped"], [])
+        data = self._cache()
+        self.assertEqual(data["hermes_kitt"]["voice_id"], "c229169886234f17a42c21ff138ed3d0")
+        # And the label survives the canonical migration.
+        after = bot_profiles.migrate_cached_fish_voices()
+        self.assertIn("hermes_kitt", after.get("dropped", []) + ["hermes_kitt"])
+
+    def test_unrepairable_placeholder_is_dropped(self):
+        (self.home / "fish_voices.json").write_text(
+            json.dumps({"ghost": {"voice_id": "ghost-id"}}), encoding="utf-8"
+        )
+        report = bot_profiles.repair_cached_fish_voices(
+            [VoiceInfo(id="c229169886234f17a42c21ff138ed3d0", name="Hermes kitt",
+                       provider="fish_audio", voice_type="cloned")]
+        )
+        self.assertEqual(report["repaired"], {})
+        self.assertEqual(report["dropped"], ["ghost"])
+
+
+class TestMannerismPromptNormalization(unittest.TestCase):
+    def test_already_mannerism_shaped_is_not_double_prefixed(self):
+        out = persona_sync.mannerism_from_prompt(
+            "mannerisms of Eric Cartman. Speak with aggressive defiance.", "Eric Cartman"
+        )
+        self.assertEqual(out, "mannerisms of Eric Cartman: Speak with aggressive defiance.")
+        self.assertNotIn("mannerisms of Eric Cartman. mannerisms", out)
+
+    def test_repeated_label_stutter_collapses_to_one(self):
+        out = persona_sync.mannerism_from_prompt(
+            "mannerisms of Eric Cartman. mannerisms of Eric Cartman. Speak with snark.",
+            "Eric Cartman",
+        )
+        self.assertEqual(out, "mannerisms of Eric Cartman: Speak with snark.")
+
+    def test_raw_identity_still_becomes_mannerisms(self):
+        out = persona_sync.mannerism_from_prompt(
+            "You are Eric Cartman from South Park. Speak with aggressive defiance.",
+            "Eric Cartman",
+        )
+        self.assertTrue(out.startswith("mannerisms of Eric Cartman"))
+        self.assertNotIn("You are Eric Cartman", out)
+
+    def test_normalization_converges(self):
+        once = persona_sync.mannerism_from_prompt(
+            "mannerisms of Eric Cartman. Speak with snark.", "Eric Cartman"
+        )
+        twice = persona_sync.mannerism_from_prompt(once, "Eric Cartman")
+        self.assertEqual(once, twice)
+
+
+class TestPackIdResolution(unittest.TestCase):
+    KNOWN = ["amanda", "cartman", "flirty", "jarvis", "vincent_price"]
+
+    def test_name_derived_slug_resolves_to_stored_pack(self):
+        self.assertEqual(pack_ids.resolve_pack_id(self.KNOWN, "eric_cartman"), "cartman")
+        self.assertEqual(pack_ids.resolve_pack_id(self.KNOWN, "Eric Cartman"), "cartman")
+
+    def test_exact_id_wins(self):
+        self.assertEqual(pack_ids.resolve_pack_id(self.KNOWN, "cartman"), "cartman")
+
+    def test_unrelated_name_does_not_match(self):
+        self.assertIsNone(pack_ids.resolve_pack_id(self.KNOWN, "zzz_nobody"))
+        self.assertIsNone(pack_ids.reconcile_applied_persona("zzz_nobody", self.KNOWN))
+
+    def test_reconcile_returns_none_for_empty(self):
+        self.assertIsNone(pack_ids.reconcile_applied_persona("", self.KNOWN))
+
+    def test_candidate_ids_prefers_explicit_id(self):
+        self.assertEqual(pack_ids.candidate_pack_ids("cartman", "Eric Cartman")[0], "cartman")
+
+
+class TestSessionStateReconciliation(IsolatedHermesHomeTest):
+    def test_orphaned_applied_persona_is_repointed(self):
+        from backend import session_overlay
+
+        state_path = self.home / "personas" / ".studio-session.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "profiles": {
+                        "mechanic": {
+                            "active": True,
+                            "applied_persona": "eric_cartman",
+                            "character_strength": 100,
+                            "stash": {"tts.provider": "edge"},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = session_overlay.reconcile_session_state(
+            ["cartman", "flirty"], state_path=state_path
+        )
+        self.assertEqual(report["repaired"]["mechanic"], "eric_cartman -> cartman")
+        reloaded = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(reloaded["profiles"]["mechanic"]["applied_persona"], "cartman")
+        # The original name-derived id is preserved for the plugin to still
+        # match the profile config's display.personality value.
+        self.assertIn(
+            "eric_cartman", reloaded["profiles"]["mechanic"]["applied_persona_aliases"]
+        )
+
+    def test_genuine_orphan_is_reported_not_guessed(self):
+        from backend import session_overlay
+
+        state_path = self.home / "personas" / ".studio-session.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "profiles": {
+                        "mechanic": {"active": True, "applied_persona": "deleted_pack"}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = session_overlay.reconcile_session_state(["cartman"], state_path=state_path)
+        self.assertEqual(report["orphans"]["mechanic"], "deleted_pack")
+        self.assertEqual(report["repaired"], {})
+
+
+class TestPersonaPackAudit(IsolatedHermesHomeTest):
+    def _bundle(self, **kw):
+        base: dict = {
+            "id": "cartman",
+            "name": "Eric Cartman",
+            "avatar": "🧢",
+            "system_prompt": "mannerisms of Eric Cartman: Speak with snark.",
+            "provider": "voicebox",
+            "voice_id": "c9da87b0-19be-49c4-ab44-01cb7943f5c4",
+            "voice_name": "Cartman",
+            "character_strength": 100,
+        }
+        base.update(kw)
+        return PersonaBundle(**base)
+
+    def test_dead_voice_without_twin_is_high(self):
+        report = audit.audit_personas([self._bundle()], [])
+        codes = [f["code"] for f in report["findings"]]
+        self.assertIn("voice-missing", codes)
+        worst = report["findings"][0]
+        self.assertEqual(worst["severity"], "high")
+
+    def test_dead_voice_with_twin_is_rebound_not_lost(self):
+        voices = [VoiceInfo(id="83c6e6b8-73ac-4b9c-a4fb-b9cc07795d6a",
+                             name="Eric Cartman", provider="voicebox", voice_type="cloned")]
+        report = audit.audit_personas([self._bundle()], voices)
+        hit = [f for f in report["findings"] if f["code"] == "voice-rebound"]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0]["suggested_voice_id"], "83c6e6b8-73ac-4b9c-a4fb-b9cc07795d6a")
+
+    def test_shared_fallback_voice_is_reported(self):
+        self.home.mkdir(parents=True, exist_ok=True)
+        prof = self.home / "profiles" / "mechanic"
+        prof.mkdir(parents=True)
+        (prof / "config.yaml").write_text(
+            "tts:\n"
+            "  providers:\n"
+            "    voicebox:\n"
+            "      voice: c9da87b0-19be-49c4-ab44-01cb7943f5c4\n",
+            encoding="utf-8",
+        )
+        (self.home / "config.yaml").write_text("model: x\n", encoding="utf-8")
+        report = audit.audit_personas([self._bundle()], [
+            VoiceInfo(id="c9da87b0-19be-49c4-ab44-01cb7943f5c4", name="Cartman",
+                      provider="voicebox", voice_type="cloned")
+        ])
+        hits = [f for f in report["findings"] if f["code"] == "shared-fallback-voice"]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("mechanic", hits[0]["profiles"])
+
+    def test_orphaned_overlay_is_high(self):
+        state = {"profiles": {"mechanic": {"active": True, "applied_persona": "gone_pack"}}}
+        report = audit.audit_personas([self._bundle()], [], session_state=state)
+        hits = [f for f in report["findings"] if f["code"] == "overlay-orphan"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["severity"], "high")
+
+    def test_overlay_id_drift_is_reported(self):
+        state = {"profiles": {"mechanic": {"active": True, "applied_persona": "eric_cartman"}}}
+        report = audit.audit_personas([self._bundle()], [], session_state=state)
+        hits = [f for f in report["findings"] if f["code"] == "overlay-id-drift"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["pack_id"], "cartman")
+
+    def test_voice_without_pack_is_low(self):
+        voices = [VoiceInfo(id="2e49fe0b8ee9422c84775d458e02a771", name="Hermes porky_pig",
+                            provider="fish_audio", voice_type="cloned")]
+        report = audit.audit_personas([], voices)
+        hits = [f for f in report["findings"] if f["code"] == "voice-without-pack"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["severity"], "low")
+
+    def test_healthy_pack_reports_nothing_high(self):
+        voices = [VoiceInfo(id="c9da87b0-19be-49c4-ab44-01cb7943f5c4", name="Cartman",
+                            provider="voicebox", voice_type="cloned")]
+        report = audit.audit_personas([self._bundle()], voices)
+        self.assertNotIn("high", report["summary"])
+
+
+class TestStaleOverlayReaping(IsolatedHermesHomeTest):
+    def _seed(self, applied_at, profile="mechanic"):
+        from backend import session_overlay
+
+        state_path = self.home / "personas" / ".studio-session.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({
+                "version": 1,
+                "profiles": {
+                    profile: {
+                        "active": True,
+                        "applied_persona": "cartman",
+                        "applied_at": applied_at,
+                        "stash": {},
+                    }
+                },
+            }),
+            encoding="utf-8",
+        )
+        return state_path
+
+    def test_recent_overlay_is_left_alone(self):
+        import time
+
+        from backend import session_overlay
+
+        state_path = self._seed(time.time())
+        report = session_overlay.reap_stale_session_overlays(
+            max_age_hours=24.0, state_path=state_path
+        )
+        self.assertEqual(report["reaped"], [])
+        self.assertEqual(len(report["skipped"]), 1)
+
+    def test_old_overlay_is_reaped(self):
+        import time
+
+        from backend import session_overlay
+
+        state_path = self._seed(time.time() - 48 * 3600)
+        report = session_overlay.reap_stale_session_overlays(
+            max_age_hours=24.0, state_path=state_path
+        )
+        self.assertEqual(report["reaped"], ["mechanic"])
+        # The entry is dropped, so a later re-apply is a fresh overlay.
+        reloaded = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("mechanic", reloaded.get("profiles") or {})
+
+
+class TestStoredStyleOverlayHeal(IsolatedHermesHomeTest):
+    def test_studio_tagged_stutter_is_rewritten(self):
+        from backend import session_overlay
+
+        prof = self.home / "profiles" / "magellan"
+        prof.mkdir(parents=True)
+        (prof / "config.yaml").write_text(
+            "display:\n"
+            "  personality: ''\n"
+            "agent:\n"
+            "  personalities:\n"
+            "    eric_cartman:\n"
+            "      source: hermes-personastudio\n"
+            "      description: Eric Cartman\n"
+            "      system_prompt: \"SPEAKING STYLE OVERLAY (25%) — soft mannerisms; "
+            "SOUL primary.\\nAdditionally, reply in the speaking style and mannerisms of "
+            "Eric Cartman: mannerisms of Eric Cartman. Speak with snark.\"\n",
+            encoding="utf-8",
+        )
+        report = session_overlay.heal_stored_style_overlays(["magellan"])
+        self.assertEqual(len(report["healed"]), 1)
+        healed = yaml.safe_load((prof / "config.yaml").read_text(encoding="utf-8"))
+        text = healed["agent"]["personalities"]["eric_cartman"]["system_prompt"]
+        # The wrapper names the character once and the inner style once; the
+        # stutter (three label clauses) is gone.
+        self.assertEqual(text.lower().count("mannerisms of eric cartman"), 2)
+        self.assertIn("Speak with snark.", text)
+
+    def test_non_studio_prompt_is_never_touched(self):
+        from backend import session_overlay
+
+        prof = self.home / "profiles" / "magellan"
+        prof.mkdir(parents=True)
+        (prof / "config.yaml").write_text(
+            "agent:\n"
+            "  personalities:\n"
+            "    mine:\n"
+            "      system_prompt: My own hand written soul text that is long enough.\n",
+            encoding="utf-8",
+        )
+        report = session_overlay.heal_stored_style_overlays(["magellan"])
+        self.assertEqual(report["healed"], [])
+        kept = yaml.safe_load((prof / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            kept["agent"]["personalities"]["mine"]["system_prompt"],
+            "My own hand written soul text that is long enough.",
         )
 
 

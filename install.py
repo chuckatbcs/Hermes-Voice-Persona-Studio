@@ -115,7 +115,22 @@ def deploy_plugin(src_root: Path, dest: Path) -> None:
             shutil.copytree(src, dst, dirs_exist_ok=True)
         elif src.is_file():
             shutil.copy2(src, dst)
-    plugin_js = src_root / "desktop" / "plugin.js"
+
+    # The desktop runtime loader evaluates plugins from a Blob URL and allows
+    # ONLY @hermes/plugin-sdk and react* imports — a relative ./lib/… import
+    # cannot resolve, so the plugin fails to load and its titlebar controls
+    # (Personas / Studio) disappear. Ship the INLINED build.
+    built = src_root / "desktop" / "dist" / "plugin.js"
+    if built.is_file():
+        plugin_js = built
+    else:
+        plugin_js = src_root / "desktop" / "plugin.js"
+        if "from './lib/" in plugin_js.read_text(encoding="utf-8"):
+            raise RuntimeError(
+                "desktop/plugin.js imports ./lib/ and desktop/dist/plugin.js is missing. "
+                "Run `node scripts/build-plugin.mjs` — the desktop loader will refuse a "
+                "relative import and the Studio UI will silently fail to load."
+            )
     shutil.copy2(plugin_js, dest / "plugin.js")
     remove_stray_plugin_py(dest)
     # Never copy a misnamed plugin.py even if one exists in src.

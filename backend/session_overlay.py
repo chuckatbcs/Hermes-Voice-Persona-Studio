@@ -22,18 +22,22 @@ This module never patches ``~/.hermes/hermes-agent``.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from . import bot_profiles
 from .config_io import get_dotted, load_yaml, snapshot_values, update_config_keys
 from .managed_index import SOURCE_TAG, remember_writes
+from .pack_ids import reconcile_applied_persona
 from .paths import config_path_for_profile, session_state_path
 from .persona_sync import (
     STYLE_OVERLAY_MARKER,
     build_style_overlay_prompt,
     character_strength_percent,
     is_style_overlay_prompt,
+    overlay_strength_percent,
 )
 
 STASH_KEYS = (
@@ -80,6 +84,44 @@ def save_session_state(state: Dict[str, Any], path: Optional[Path] = None) -> No
         json.dump(state, handle, indent=2, sort_keys=True)
         handle.write("\n")
     tmp.replace(target)
+
+
+def reconcile_session_state(
+    known_ids: Iterable[str],
+    *,
+    state_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Re-point any orphaned ``applied_persona`` at the real pack id.
+
+    A pack created as ``cartman`` is applied into the profile config as
+    ``eric_cartman`` (the name slug). That left ``.studio-session.json``
+    pointing at a catalog key that does not exist, so the titlebar could not
+    show "current applied" and a rename orphaned the overlay outright. This
+    rewrites the state file in place; the profile config keeps the name-derived
+    key because that is what ``display.personality`` selects.
+    """
+    state = load_session_state(state_path)
+    profiles = state.get("profiles") or {}
+    repaired: Dict[str, str] = {}
+    orphans: Dict[str, str] = {}
+    for profile_id, entry in profiles.items():
+        if not isinstance(entry, dict) or not entry.get("active"):
+            continue
+        applied = entry.get("applied_persona") or ""
+        if not applied:
+            continue
+        resolved = reconcile_applied_persona(applied, known_ids)
+        if resolved and resolved != applied:
+            entry["applied_persona"] = resolved
+            entry["applied_persona_aliases"] = sorted(
+                set(entry.get("applied_persona_aliases") or []) | {applied}
+            )
+            repaired[profile_id] = f"{applied} -> {resolved}"
+        elif not resolved:
+            orphans[profile_id] = applied
+    if repaired or orphans:
+        save_session_state(state, state_path)
+    return {"ok": True, "repaired": repaired, "orphans": orphans}
 
 
 def overlay_status(profile_id: str, *, state_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -305,6 +347,12 @@ def apply_session_overlay(
     entry["character_strength"] = strength
     entry["provider"] = provider or ""
     entry["voice_name"] = voice_name or ""
+    # O-6: there is no true session-scoped Hermes API, so an overlay left
+    # behind by an unloaded plugin would persist forever. Stamp it so
+    # reap_stale_session_overlays can restore stock for a session that is
+    # long gone.
+    entry["applied_at"] = time.time()
+    entry["applied_pid"] = os.getpid()
     profiles[profile_id] = entry
     save_session_state(state, state_path)
 
@@ -386,6 +434,98 @@ def reset_session_overlay(
             if restored_keys or leftover_cleared
             else "No Studio session overlay was active"
         ),
+    }
+
+
+def heal_stored_style_overlays(
+    profile_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Rewrite Studio-tagged stored personality prompts that carry a stutter.
+
+    A pack applied before the mannerism-shaped guard produced
+    "mannerisms of X. mannerisms of X. Speak with ..." in
+    ``agent.personalities.<key>.system_prompt``. The entry is inert while
+    ``display.personality`` selects something else, but the next apply of
+    that key would read the malformed text back.
+
+    Only entries this Studio wrote (``source: hermes-personastudio``) are
+    touched, and only when the normalized text actually differs.
+    """
+    profiles = profile_ids
+    if profiles is None:
+        profiles = [p.get("id") for p in bot_profiles.list_bot_profiles() if p.get("id")]
+    healed: List[Dict[str, Any]] = []
+    for raw_id in profiles:
+        if not raw_id:
+            continue
+        profile_id = str(raw_id)
+        cfg_path = config_path_for_profile(profile_id)
+        if not cfg_path.exists():
+            continue
+        try:
+            cfg = load_yaml(cfg_path)
+        except Exception:
+            continue
+        personalities = get_dotted(cfg, "agent.personalities")
+        if not isinstance(personalities, dict):
+            continue
+        updates: Dict[str, Any] = {}
+        for key, val in personalities.items():
+            if not isinstance(val, dict) or val.get("source") != SOURCE_TAG:
+                continue
+            prompt = str(val.get("system_prompt") or "").strip()
+            if not prompt or not is_style_overlay_prompt(prompt):
+                continue
+            label = str(val.get("description") or key).strip() or key
+            percent = overlay_strength_percent(prompt)
+            fixed = build_style_overlay_prompt(label, prompt, strength=percent or 25)
+            if fixed and fixed != prompt:
+                updates[f"agent.personalities.{key}.system_prompt"] = fixed
+        if updates:
+            update_config_keys(cfg_path, updates)
+            healed.append({"profile_id": profile_id, "keys": sorted(updates)})
+    return {"ok": True, "healed": healed}
+
+
+def reap_stale_session_overlays(
+    *,
+    max_age_hours: float = 24.0,
+    state_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Restore stock for overlays older than *max_age_hours*.
+
+    Hermes has no session-scoped personality/TTS API, so an overlay survives
+    until something restores it. If the plugin is unloaded mid-chat nothing
+    ever does, and the profile stays stuck in character. This restores stock
+    for any overlay whose ``applied_at`` is older than the cutoff.
+
+    An overlay with no ``applied_at`` (written before stamping) is treated as
+    stale, because an untraceable overlay cannot be shown to belong to a live
+    session. ``dry_run=True`` reports without writing.
+    """
+    state = load_session_state(state_path)
+    profiles = state.get("profiles") or {}
+    if not profiles:
+        return {"ok": True, "reaped": [], "skipped": [], "max_age_hours": max_age_hours}
+
+    cutoff = time.time() - (max_age_hours * 3600.0)
+    reaped: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    for profile_id, entry in list(profiles.items()):
+        if not isinstance(entry, dict) or not entry.get("active"):
+            continue
+        applied_at = entry.get("applied_at")
+        if isinstance(applied_at, (int, float)) and applied_at > cutoff:
+            skipped.append({"profile_id": profile_id, "applied_at": applied_at})
+            continue
+        result = reset_session_overlay(profile_id, state_path=state_path)
+        reaped.append(profile_id)
+        _ = result
+    return {
+        "ok": True,
+        "reaped": reaped,
+        "skipped": skipped,
+        "max_age_hours": max_age_hours,
     }
 
 
