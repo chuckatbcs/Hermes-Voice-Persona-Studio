@@ -40,20 +40,28 @@ def _unit_is_ours(path: Path) -> bool:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return False
-    return SYSTEMD_MARKER in text or "Hermes PersonaStudio companion" in text
+    lowered = text.lower()
+    return (
+        SYSTEMD_MARKER.lower() in lowered
+        or "hermes personastudio companion" in lowered
+        or "hermes-personastudio" in lowered
+        or "personastudio" in lowered
+    )
 
 
 def write_systemd_unit(exec_python: str, server_path: Path, working_dir: Path) -> Path:
     USER_SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
     unit = f"""{SYSTEMD_MARKER}
 [Unit]
-Description=Hermes PersonaStudio companion
+Description=Hermes PersonaStudio Companion Server
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory={working_dir}
 Environment=PYTHONPATH={working_dir}
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/sh -c 'STALE=$(lsof -ti:{COMPANION_PORT} 2>/dev/null); if [ -n "$STALE" ]; then echo "[PersonaStudio] Killing stale PID $STALE on :{COMPANION_PORT}"; kill -TERM $STALE 2>/dev/null || true; sleep 1; kill -KILL $STALE 2>/dev/null || true; fi'
 ExecStart={exec_python} {server_path}
 Restart=on-failure
 RestartSec=3
@@ -65,6 +73,7 @@ WantedBy=default.target
     path.write_text(unit, encoding="utf-8")
     _systemctl_user("daemon-reload")
     _systemctl_user("enable", "--now", SYSTEMD_UNIT_NAME)
+    _systemctl_user("restart", SYSTEMD_UNIT_NAME)
     return path
 
 
@@ -107,6 +116,18 @@ def remove_stray_plugin_py(plugin_dir: Path) -> None:
 
 
 def deploy_plugin(src_root: Path, dest: Path) -> None:
+    # Build the inlined single-file plugin if scripts/build-plugin.mjs is available
+    build_script = src_root / "scripts" / "build-plugin.mjs"
+    if build_script.exists():
+        try:
+            res = _run(["node", str(build_script)], cwd=str(src_root), capture_output=True, text=True)
+            if res.returncode == 0:
+                print("  ✓ Built fresh desktop/dist/plugin.js via scripts/build-plugin.mjs")
+            else:
+                print(f"  ℹ build-plugin.mjs warning: {res.stderr.strip() or res.stdout.strip()}")
+        except Exception as e:
+            print(f"  ℹ Could not run build-plugin.mjs ({e}); using existing dist or source")
+
     dest.mkdir(parents=True, exist_ok=True)
     for item in ["desktop", "backend", "server.py"]:
         src = src_root / item
@@ -212,27 +233,47 @@ def install(sync_voices: bool = True, systemd: bool = False) -> int:
 
     # 6. Check/Start background companion service
     print("[6/6] Starting PersonaStudio companion service on port 17495...")
-    if systemd:
+    unit_path = _systemd_unit_path()
+    has_systemd_unit = unit_path.exists() and _unit_is_ours(unit_path)
+    use_systemd = systemd or has_systemd_unit
+
+    if use_systemd:
         try:
             unit = write_systemd_unit(sys.executable, HERMES_DESKTOP_PLUGINS / "server.py", HERMES_DESKTOP_PLUGINS)
-            print(f"  ✓ Installed and started systemd user unit: {unit}")
+            print(f"  ✓ Refreshed and restarted systemd user unit: {unit}")
         except Exception as e:
             print(f"  ℹ systemd helper failed ({e}); falling back to a background process.")
-            systemd = False
-    if not systemd:
+            use_systemd = False
+    if not use_systemd:
+        kill_companion_port()
+        server_exec = HERMES_DESKTOP_PLUGINS / "server.py"
+        if not server_exec.exists():
+            server_exec = COMPANION_SERVER_PY
+        proc = subprocess.Popen(
+            [sys.executable, str(server_exec)],
+            cwd=str(server_exec.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print(f"  ✓ Restarted background companion daemon (PID: {proc.pid}) on port 17495.")
+
+    # Verify service health
+    import time
+    import urllib.request
+    running = False
+    for _ in range(15):
         try:
-            import urllib.request
-            with urllib.request.urlopen("http://127.0.0.1:17495/api/studio/status", timeout=1) as resp:
+            with urllib.request.urlopen(f"http://127.0.0.1:{COMPANION_PORT}/api/studio/status", timeout=1) as resp:
                 if resp.status == 200:
-                    print("  ✓ Companion service is already running on http://127.0.0.1:17495.")
+                    running = True
+                    break
         except Exception:
-            proc = subprocess.Popen(
-                [sys.executable, str(COMPANION_SERVER_PY)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            print(f"  ✓ Launched background companion daemon (PID: {proc.pid}) on port 17495.")
+            time.sleep(0.2)
+    if running:
+        print(f"  ✓ Companion service is verified healthy on http://127.0.0.1:{COMPANION_PORT}")
+    else:
+        print(f"  ℹ Note: Companion service did not respond immediately on http://127.0.0.1:{COMPANION_PORT}")
 
     print("\n" + "=" * 60)
     print("  Installation Complete! 🎉")
